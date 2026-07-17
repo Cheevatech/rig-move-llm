@@ -25,6 +25,10 @@ const targets = [
   { os: "windows", arch: "arm64", nodeOS: "win32", cpu: "arm64" },
 ];
 
+// npm auto-includes a LICENSE at the package root in every published tarball.
+const license = join(npmRoot, "..", "LICENSE");
+copyFileSync(license, join(npmRoot, "LICENSE"));
+
 const optionalDependencies = {};
 for (const t of targets) {
   const name = `@rig-move-llm/${t.os}-${t.arch}`;
@@ -43,6 +47,7 @@ for (const t of targets) {
   const dst = join(binDir, `rig-move-llm${ext}`);
   copyFileSync(src, dst);
   if (!ext) chmodSync(dst, 0o755);
+  copyFileSync(license, join(pkgDir, "LICENSE"));
 
   writeFileSync(
     join(pkgDir, "package.json"),

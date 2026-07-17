@@ -1,0 +1,27 @@
+{
+  "name": "rig-move-llm",
+  "version": "0.2.0",
+  "description": "Move the heavy lifting off your paid LLM — a local proxy that delegates Claude Code's worker inference to your own endpoint.",
+  "bin": {
+    "rig-move-llm": "bin/rig-move-llm.js"
+  },
+  "files": [
+    "bin"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "optionalDependencies": {
+    "@rig-move-llm/darwin-amd64": "0.2.0",
+    "@rig-move-llm/darwin-arm64": "0.2.0",
+    "@rig-move-llm/linux-amd64": "0.2.0",
+    "@rig-move-llm/linux-arm64": "0.2.0",
+    "@rig-move-llm/windows-amd64": "0.2.0",
+    "@rig-move-llm/windows-arm64": "0.2.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rigmovellm/rig-move-llm"
+  }
+}

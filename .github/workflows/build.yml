@@ -1,0 +1,97 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+env:
+  # 1.22+ emits LC_UUID on Darwin and auto ad-hoc-signs, so no external linker or
+  # codesign step is needed for the macOS binaries.
+  GO_VERSION: "1.22"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - run: go vet ./...
+      - run: go test ./...
+
+  cross-compile:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: darwin,  goarch: amd64 }
+          - { goos: darwin,  goarch: arm64 }
+          - { goos: linux,   goarch: amd64 }
+          - { goos: linux,   goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+          - { goos: windows, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          VERSION="${GITHUB_REF_NAME:-dev}"
+          EXT=""; [ "$GOOS" = "windows" ] && EXT=".exe"
+          OUT="dist/rig-move-llm-${GOOS}-${GOARCH}${EXT}"
+          mkdir -p dist
+          go build -trimpath \
+            -ldflags "-s -w -X github.com/rigmovellm/rig-move-llm/internal/cli.Version=${VERSION}" \
+            -o "$OUT" ./cmd/rig-move-llm
+          ls -la "$OUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rig-move-llm-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+
+  publish-npm:
+    needs: cross-compile
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm provenance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+      - name: collect binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: stamp platform packages
+        working-directory: npm
+        env:
+          VERSION: ${{ github.ref_name }}
+          DIST: ${{ github.workspace }}/dist
+        run: |
+          # strip the leading "v" from the tag for the npm version
+          export VERSION="${VERSION#v}"
+          node scripts/prepare-npm.mjs
+      - name: publish
+        working-directory: npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for pkg in platforms/*/; do
+            npm publish "$pkg" --access public --provenance
+          done
+          npm publish --access public --provenance

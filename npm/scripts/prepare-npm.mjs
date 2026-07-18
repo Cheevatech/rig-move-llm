@@ -31,7 +31,7 @@ copyFileSync(license, join(npmRoot, "LICENSE"));
 
 const optionalDependencies = {};
 for (const t of targets) {
-  const name = `@rig-move-llm/${t.os}-${t.arch}`;
+  const name = `@cheevatech/${t.os}-${t.arch}`;
   optionalDependencies[name] = version;
 
   const ext = t.os === "windows" ? ".exe" : "";

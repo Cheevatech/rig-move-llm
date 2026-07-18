@@ -51,7 +51,7 @@ jobs:
           OUT="dist/rig-move-llm-${GOOS}-${GOARCH}${EXT}"
           mkdir -p dist
           go build -trimpath \
-            -ldflags "-s -w -X github.com/rigmovellm/rig-move-llm/internal/cli.Version=${VERSION}" \
+            -ldflags "-s -w -X github.com/Cheevatech/rig-move-llm/internal/cli.Version=${VERSION}" \
             -o "$OUT" ./cmd/rig-move-llm
           ls -la "$OUT"
       - uses: actions/upload-artifact@v4

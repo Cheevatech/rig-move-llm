@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/rigmovellm/rig-move-llm/internal/config"
-	"github.com/rigmovellm/rig-move-llm/internal/service"
+	"github.com/Cheevatech/rig-move-llm/internal/config"
+	"github.com/Cheevatech/rig-move-llm/internal/service"
 )
 
 // cmdUninstall reverses `init` for a scope: it restores the pre-init

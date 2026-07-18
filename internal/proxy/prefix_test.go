@@ -12,8 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/rigmovellm/rig-move-llm/internal/config"
-	"github.com/rigmovellm/rig-move-llm/internal/stats"
+	"github.com/Cheevatech/rig-move-llm/internal/config"
+	"github.com/Cheevatech/rig-move-llm/internal/stats"
 )
 
 const workerReply = `{"id":"x","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`

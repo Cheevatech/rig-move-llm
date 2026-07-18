@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rigmovellm/rig-move-llm/internal/config"
-	"github.com/rigmovellm/rig-move-llm/internal/stats"
+	"github.com/Cheevatech/rig-move-llm/internal/config"
+	"github.com/Cheevatech/rig-move-llm/internal/stats"
 )
 
 // TestMainUsageSurvivesUpstreamCompression reproduces the live P6 parity gap:

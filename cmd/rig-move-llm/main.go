@@ -6,7 +6,7 @@ package main
 import (
 	"os"
 
-	"github.com/rigmovellm/rig-move-llm/internal/cli"
+	"github.com/Cheevatech/rig-move-llm/internal/cli"
 )
 
 func main() {

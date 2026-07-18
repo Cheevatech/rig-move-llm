@@ -12,16 +12,16 @@
     "node": ">=16"
   },
   "optionalDependencies": {
-    "@rig-move-llm/darwin-amd64": "0.2.0",
-    "@rig-move-llm/darwin-arm64": "0.2.0",
-    "@rig-move-llm/linux-amd64": "0.2.0",
-    "@rig-move-llm/linux-arm64": "0.2.0",
-    "@rig-move-llm/windows-amd64": "0.2.0",
-    "@rig-move-llm/windows-arm64": "0.2.0"
+    "@cheevatech/darwin-amd64": "0.2.0",
+    "@cheevatech/darwin-arm64": "0.2.0",
+    "@cheevatech/linux-amd64": "0.2.0",
+    "@cheevatech/linux-arm64": "0.2.0",
+    "@cheevatech/windows-amd64": "0.2.0",
+    "@cheevatech/windows-arm64": "0.2.0"
   },
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/rigmovellm/rig-move-llm"
+    "url": "https://github.com/Cheevatech/rig-move-llm"
   }
 }

@@ -15,4 +15,4 @@ Add `--global` to `init` to install for every project. Reverse it with
 
 This npm package ships a single prebuilt static binary per platform (via
 `optionalDependencies`, the esbuild/biome pattern — no postinstall download).
-Source, docs, and releases: https://github.com/rigmovellm/rig-move-llm
+Source, docs, and releases: https://github.com/Cheevatech/rig-move-llm

@@ -55,7 +55,7 @@ Legend: ✅ full · ⚠️ partial (see note) · ❌ not applicable (see why)
 
 | Feature | Status | Notes |
 |---|---|---|
-| Envelope | ✅ | `{id,type:"message",role:"assistant",model:<inbound>,content,stop_reason,stop_sequence,usage}`. Missing `id` → `msg_rigmovellm`. |
+| Envelope | ✅ | `{id,type:"message",role:"assistant",model:<inbound>,content,stop_reason,stop_sequence,usage}`. Missing `id` → `msg_rmll`. |
 | `content` block order | ✅ | thinking → text → tool_use. |
 | `reasoning_content` → thinking | ✅ | **Priority feature.** `{type:"thinking",thinking:<text>,signature:""}`, always first. Handles the real-world payload where `content` is empty. |
 | text (`message.content`) | ✅ | → `{type:"text"}`. |

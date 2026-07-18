@@ -144,7 +144,7 @@ func StreamOpenAIToAnthropicUsage(w io.Writer, body io.Reader, inboundModel stri
 	flusher, _ := w.(http.Flusher)
 	sw := &sseWriter{w: w, flusher: flusher}
 
-	msgID := "msg_rigmovellm"
+	msgID := "msg_rmll"
 
 	sw.event("message_start", map[string]interface{}{
 		"type": "message_start",

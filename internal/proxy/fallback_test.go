@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rigmovellm/rig-move-llm/internal/config"
-	"github.com/rigmovellm/rig-move-llm/internal/stats"
+	"github.com/Cheevatech/rig-move-llm/internal/config"
+	"github.com/Cheevatech/rig-move-llm/internal/stats"
 )
 
 const openAIOK = `{"id":"x","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":300,"completion_tokens":20}}`

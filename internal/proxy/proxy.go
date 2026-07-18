@@ -20,9 +20,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rigmovellm/rig-move-llm/internal/config"
-	"github.com/rigmovellm/rig-move-llm/internal/stats"
-	"github.com/rigmovellm/rig-move-llm/pkg/translate"
+	"github.com/Cheevatech/rig-move-llm/internal/config"
+	"github.com/Cheevatech/rig-move-llm/internal/stats"
+	"github.com/Cheevatech/rig-move-llm/pkg/translate"
 )
 
 var haikuRe = regexp.MustCompile(`(?i)haiku`)

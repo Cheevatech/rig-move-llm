@@ -76,7 +76,7 @@ func ResponseOpenAIToAnthropic(o OpenAIResponse, inboundModel string) AnthropicR
 		StopSequence: nil,
 	}
 	if resp.ID == "" {
-		resp.ID = "msg_rigmovellm"
+		resp.ID = "msg_rmll"
 	}
 
 	var content []AnthropicContentBlockOut

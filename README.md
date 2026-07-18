@@ -170,6 +170,24 @@ rig-move-llm run   [--] <command...>         launch a command with the proxy wir
 rig-move-llm stats [--reset|--history]       token accounting / savings
 ```
 
+### Agent teams (experimental)
+
+Claude Code's experimental agent teams work under rig with no extra setup. In the
+default **in-process** backend each teammate shares the lead's process and its tool
+calls already carry an `agent_id`, so the force-delegate hook treats teammates as
+workers automatically while the lead stays plan/delegate/review-only.
+
+The **terminal backends** (`--teammate-mode tmux|iterm2`) spawn each teammate as a
+separate `claude` process whose hook payloads have no `agent_id` — they would
+otherwise be mistaken for the paid lead and denied every tool. `rig-move-llm run`
+points `CLAUDE_CODE_TEAMMATE_COMMAND` at itself so it can stamp the teammate's
+identity (`RIG_AGENT_ID`, which the hook honors like `agent_id`) and, by default,
+pin the teammate to the worker tier so its inference runs on your endpoint. Set
+`RIG_TEAMMATE_MODEL=inherit` to keep the model the lead requested, or
+`RIG_TEAMMATE_MODEL=<name>` to force a specific one. A launcher you set yourself in
+`CLAUDE_CODE_TEAMMATE_COMMAND` is never overwritten. Teams are interactive-only
+(headless `-p` has no teams), so this path is not exercised by rig's CI smokes.
+
 ## Layout
 
 ```

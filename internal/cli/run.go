@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/rigmovellm/rig-move-llm/internal/config"
+	"github.com/Cheevatech/rig-move-llm/internal/config"
 )
 
 // cmdRun launches a command (typically `claude`) with the proxy wired into its
@@ -55,6 +55,14 @@ func cmdRun(args []string) int {
 		"ANTHROPIC_BASE_URL="+baseURL,
 		"CLAUDE_CODE_SUBAGENT_MODEL=haiku", // pins subagents to the worker leg
 	)
+	// Terminal-backend agent teams (tmux/iterm2) spawn each teammate as a fresh
+	// claude with no agent_id in its hook payloads; point their launcher at us so
+	// teammate-exec can stamp the identity + worker-tier model. The default
+	// in-process backend ignores this (its teammates already carry agent_id). A
+	// user-set value wins — we never clobber a launcher they configured.
+	if self, err := os.Executable(); err == nil && os.Getenv("CLAUDE_CODE_TEAMMATE_COMMAND") == "" {
+		cmd.Env = append(cmd.Env, "CLAUDE_CODE_TEAMMATE_COMMAND="+self)
+	}
 	if err := cmd.Run(); err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
 			return ee.ExitCode()

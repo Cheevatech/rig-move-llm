@@ -26,7 +26,7 @@ import (
 // Label is the launchd label / systemd unit name / Windows task name. It doubles
 // as the reverse-DNS identifier launchd requires.
 const (
-	Label    = "com.rigmovellm.rig-move-llm"
+	Label    = "com.cheevatech.rig-move-llm"
 	UnitName = "rig-move-llm"
 )
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Thin launcher: resolve the prebuilt binary for this platform (delivered as an
-// optionalDependency @rig-move-llm/<os>-<arch>, the esbuild/biome pattern — no
+// optionalDependency @cheevatech/<os>-<arch>, the esbuild/biome pattern — no
 // postinstall download) and hand off argv verbatim.
 "use strict";
 
@@ -17,7 +17,7 @@ function binaryPath() {
   if (!goos || !goarch) {
     fail(`unsupported platform: ${process.platform}/${process.arch}`);
   }
-  const pkg = `@rig-move-llm/${goos}-${goarch}`;
+  const pkg = `@cheevatech/${goos}-${goarch}`;
   const ext = goos === "windows" ? ".exe" : "";
   try {
     // Resolve via the platform package's package.json, then join to its binary.
@@ -27,7 +27,7 @@ function binaryPath() {
     fail(
       `missing platform package ${pkg}.\n` +
         `Reinstall with optional dependencies enabled (npm install --include=optional),\n` +
-        `or grab a binary from https://github.com/rigmovellm/rig-move-llm/releases`
+        `or grab a binary from https://github.com/Cheevatech/rig-move-llm/releases`
     );
   }
 }

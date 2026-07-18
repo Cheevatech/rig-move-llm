@@ -50,6 +50,22 @@ type State struct {
 	SharedMCP map[string]bool
 }
 
+// effectiveAgentID resolves the subagent identity for the current tool call.
+// Classic subagents carry it in the payload's agent_id. Agent-team teammates
+// spawned via a terminal backend (tmux/iterm2) run as a separate `claude`
+// process whose hook payloads have NO agent_id — so without this they would be
+// mistaken for the paid MAIN and denied their tools. rig's teammate-exec
+// launcher stamps their identity into RIG_AGENT_ID, which we treat as
+// equivalent here. The MAIN (lead) process is launched without RIG_AGENT_ID and
+// its payloads have no agent_id, so it keeps its plan/delegate/review-only
+// posture (reliability floor #1: the lead can never obtain a worker marker).
+func effectiveAgentID(p payload) string {
+	if p.AgentID != "" {
+		return p.AgentID
+	}
+	return os.Getenv("RIG_AGENT_ID")
+}
+
 const denyReason = "Main agent is plan/delegate/review only. Delegate this to the worker subagent (Task tool) — it edits files, uses knowledge/search, and runs the tests. The ONLY files you may Write yourself are the gate contract under <repo>/.gate/ (repro + gate.json). Do not do other code work or run commands yourself."
 
 // PreTool implements the force-delegate PreToolUse hook. It reads the payload
@@ -57,10 +73,11 @@ const denyReason = "Main agent is plan/delegate/review only. Delegate this to th
 // returns nil error (a silent allow is an empty stdout + exit 0 by the caller).
 func (s *State) PreTool(r io.Reader, w io.Writer) error {
 	p := decode(r)
-	s.logf("agent_id=%s tool=%s", orMain(p.AgentID), or(p.ToolName, "?"))
+	agentID := effectiveAgentID(p)
+	s.logf("agent_id=%s tool=%s", orMain(agentID), or(p.ToolName, "?"))
 
-	// Subagent: allow everything (it is the worker).
-	if p.AgentID != "" {
+	// Subagent (or teammate): allow everything (it is the worker).
+	if agentID != "" {
 		return nil
 	}
 
@@ -108,7 +125,7 @@ func (s *State) PostTool(r io.Reader, w io.Writer) error {
 	p := decode(r)
 
 	// Only MAIN's Task/Agent returns are gate points.
-	if p.AgentID != "" {
+	if effectiveAgentID(p) != "" {
 		return nil
 	}
 	if p.ToolName != "Task" && p.ToolName != "Agent" {

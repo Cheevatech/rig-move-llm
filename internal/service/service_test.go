@@ -195,7 +195,7 @@ func TestUninstallIdempotentWhenNeverInstalled(t *testing.T) {
 func TestStatusDarwinParsesState(t *testing.T) {
 	m, _ := mgr("darwin", t)
 	m.Run = func(name string, args ...string) ([]byte, error) {
-		return []byte("com.rigmovellm.rig-move-llm = {\n\tstate = running\n}\n"), nil
+		return []byte("com.cheevatech.rig-move-llm = {\n\tstate = running\n}\n"), nil
 	}
 	got, _ := m.Status()
 	if got != "loaded (running)" {

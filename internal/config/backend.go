@@ -41,7 +41,7 @@ var registry = map[string]Backend{
 		Name:        "openrouter",
 		DefaultBase: "https://openrouter.ai/api/v1",
 		ExtraHeaders: map[string]string{
-			"HTTP-Referer": "https://github.com/rigmovellm/rig-move-llm",
+			"HTTP-Referer": "https://github.com/Cheevatech/rig-move-llm",
 			"X-Title":      "rig-move-llm",
 		},
 	},

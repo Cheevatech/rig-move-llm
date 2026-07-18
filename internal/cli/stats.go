@@ -8,7 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/rigmovellm/rig-move-llm/internal/config"
+	"github.com/Cheevatech/rig-move-llm/internal/config"
 )
 
 // stats is the cumulative token ledger persisted at <dataDir>/stats.json.

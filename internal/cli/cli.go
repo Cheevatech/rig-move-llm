@@ -22,10 +22,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/rigmovellm/rig-move-llm/internal/config"
-	"github.com/rigmovellm/rig-move-llm/internal/hook"
-	"github.com/rigmovellm/rig-move-llm/internal/proxy"
-	"github.com/rigmovellm/rig-move-llm/internal/service"
+	"github.com/Cheevatech/rig-move-llm/internal/config"
+	"github.com/Cheevatech/rig-move-llm/internal/hook"
+	"github.com/Cheevatech/rig-move-llm/internal/proxy"
+	"github.com/Cheevatech/rig-move-llm/internal/service"
 )
 
 // Version is stamped at build time via -ldflags "-X ...cli.Version=...".
@@ -50,8 +50,19 @@ func Main(args []string) int {
 		fmt.Fprintln(os.Stderr, usage)
 		return 2
 	}
+	// Terminal-backend agent teams (tmux/iterm2) invoke us as
+	// CLAUDE_CODE_TEAMMATE_COMMAND with the teammate's claude flags appended
+	// (led by --agent-id). Route those to the teammate launcher before the
+	// normal subcommand switch — the flags are not a rig subcommand.
+	if looksLikeTeammateSpawn(args) {
+		return cmdTeammateExec(args)
+	}
+
 	cmd, rest := args[0], args[1:]
 	switch cmd {
+	case "teammate-exec":
+		// Explicit form (docs/tests): the remaining args are the claude flags.
+		return cmdTeammateExec(rest)
 	case "serve":
 		return cmdServe(rest)
 	case "hook":

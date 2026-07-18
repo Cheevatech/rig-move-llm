@@ -15,6 +15,12 @@ const npmRoot = resolve(here, "..");
 const version = process.env.VERSION || "0.0.0";
 const dist = resolve(process.env.DIST || join(npmRoot, "..", "dist"));
 
+// npm --provenance requires every published package's package.json to carry a
+// repository.url matching the GitHub source it was built from. Reuse the main
+// package's repository so the platform packages inherit the same value.
+const mainPkgPath = join(npmRoot, "package.json");
+const repository = JSON.parse(readFileSync(mainPkgPath, "utf8")).repository;
+
 // os/arch use Go's GOOS/GOARCH; cpu/nodeOS are npm's manifest fields.
 const targets = [
   { os: "darwin", arch: "amd64", nodeOS: "darwin", cpu: "x64" },
@@ -60,6 +66,7 @@ for (const t of targets) {
         cpu: [t.cpu],
         files: ["bin"],
         license: "MIT",
+        repository,
       },
       null,
       2

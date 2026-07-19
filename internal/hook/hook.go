@@ -66,7 +66,15 @@ func effectiveAgentID(p payload) string {
 	return os.Getenv("RIG_AGENT_ID")
 }
 
-const denyReason = "Main agent is plan/delegate/review only. Delegate this to the worker subagent (Task tool) — it edits files, uses knowledge/search, and runs the tests. The ONLY files you may Write yourself are the gate contract under <repo>/.gate/ (repro + gate.json). Do not do other code work or run commands yourself."
+// workerTool is the OPTION-2 offload tool (P9): the MAIN agent delegates all code
+// work by calling it. Its server key ("worker") is fixed by the generated
+// mcp-config; CC exposes it as mcp__worker__implement.
+const workerTool = "mcp__worker__implement"
+
+// workerServer is the MCP server name whose tools MAIN is allowed to call.
+const workerServer = "worker"
+
+const denyReason = "Main agent is plan/delegate/review only. Delegate this to the worker by calling the implement tool (mcp__worker__implement) — it edits files, runs the tests, and returns a diff. The ONLY files you may Write yourself are the gate contract under <repo>/.gate/ (repro + gate.json). Do not edit files, run commands, or spawn subagents yourself."
 
 // PreTool implements the force-delegate PreToolUse hook. It reads the payload
 // from r, may mutate on-disk state, and writes any decision JSON to w. It always
@@ -97,6 +105,13 @@ func (s *State) PreTool(r io.Reader, w io.Writer) error {
 		return deny(w)
 
 	case strings.HasPrefix(p.ToolName, "mcp__"):
+		// The offload tool (P9): MAIN's sanctioned way to do code work. Calling it
+		// is the delegate/freeze point — snapshot every authored .gate dir before
+		// the worker runs, so the deterministic gate trusts only the frozen contract.
+		if mcpServer(p.ToolName) == workerServer {
+			s.freezeGateDirs()
+			return nil
+		}
 		// Shared-MCP tier: MAIN keeps the allowlisted servers, is denied the rest.
 		if s.SharedMCP[mcpServer(p.ToolName)] {
 			return nil
@@ -104,15 +119,10 @@ func (s *State) PreTool(r io.Reader, w io.Writer) error {
 		return deny(w)
 
 	case p.ToolName == "Task" || p.ToolName == "Agent":
-		// Delegates must run synchronously so the gate can verify the result when
-		// it returns (a background delegate's PostToolUse fires at spawn-ack only).
-		if !(p.ToolInput.RunInBackground != nil && *p.ToolInput.RunInBackground == false) {
-			return denyMsg(w, "Delegates must run synchronously so the deterministic gate can verify the result when it returns. Re-issue this exact Task call with \"run_in_background\": false.")
-		}
-		// Seam 2: first delegate = freeze point. Snapshot every authored .gate dir
-		// not yet frozen; the runner trusts only the snapshot.
-		s.freezeGateDirs()
-		return nil
+		// Under Option 2, native subagents are dead for offload: on CC 2.1.214 they
+		// run in-process and never reach an interceptor, and their inference is on
+		// the paid main leg (see ticket P9). Steer MAIN to the worker MCP tool.
+		return denyMsg(w, "Do not spawn subagents. Delegate code work to the worker by calling mcp__worker__implement — it runs on your worker model and returns a diff + test result.")
 	}
 
 	return nil
@@ -124,11 +134,12 @@ func (s *State) PreTool(r io.Reader, w io.Writer) error {
 func (s *State) PostTool(r io.Reader, w io.Writer) error {
 	p := decode(r)
 
-	// Only MAIN's Task/Agent returns are gate points.
+	// Only MAIN's delegate returns are gate points: the worker MCP tool (Option 2)
+	// or a legacy/teammate Task/Agent.
 	if effectiveAgentID(p) != "" {
 		return nil
 	}
-	if p.ToolName != "Task" && p.ToolName != "Agent" {
+	if p.ToolName != workerTool && p.ToolName != "Task" && p.ToolName != "Agent" {
 		return nil
 	}
 	dirs := s.readGatePaths()

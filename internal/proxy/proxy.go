@@ -149,6 +149,16 @@ func (s *Server) resolveProject(w http.ResponseWriter, r *http.Request) (cfg con
 
 // handle routes the request between the worker leg (OpenAI translation) and the
 // main leg (raw Anthropic passthrough), based on the JSON body's "model".
+//
+// NOTE (ticket P9 / Option 2): the worker leg is now VESTIGIAL for real CC
+// traffic. On CC 2.1.214 native subagents run in-process and never egress here,
+// and the subagent-model pin was removed, so no "haiku"-model request arrives in
+// normal use (a normal main model — opus/sonnet — never matches haikuRe and
+// passes through untouched). Offload moved to the worker MCP tool
+// (mcp__worker__implement). The worker-leg code + its L2 fallback / L4 %-budget
+// are retained deliberately: they are the machinery a future re-integration of
+// per-project routing/budget onto the worker path will reuse (deferred in P9).
+// Full removal is a separate, larger cleanup — not this slice.
 func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	cfg, project, ok := s.resolveProject(w, r)
 	if !ok {

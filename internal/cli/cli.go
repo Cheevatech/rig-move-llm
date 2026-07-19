@@ -26,6 +26,7 @@ import (
 	"github.com/Cheevatech/rig-move-llm/internal/hook"
 	"github.com/Cheevatech/rig-move-llm/internal/proxy"
 	"github.com/Cheevatech/rig-move-llm/internal/service"
+	"github.com/Cheevatech/rig-move-llm/internal/worker"
 )
 
 // Version is stamped at build time via -ldflags "-X ...cli.Version=...".
@@ -36,6 +37,7 @@ const usage = `rig-move-llm — move the heavy lifting off your paid LLM
 Usage:
   rig-move-llm serve [--port N] [--status]  run the routing proxy / report its state
   rig-move-llm hook  pre-tool|post-tool    Claude Code hook (reads a payload on stdin)
+  rig-move-llm worker                      run the worker MCP server on stdio (offload tool)
   rig-move-llm init  [--global] [--service] [flags]  bootstrap config + Claude Code wiring
   rig-move-llm uninstall [--global] [--purge]  reverse init for a scope (incl. OS service)
   rig-move-llm run   [--] <command...>     launch a command with the proxy wired in
@@ -67,6 +69,8 @@ func Main(args []string) int {
 		return cmdServe(rest)
 	case "hook":
 		return cmdHook(rest)
+	case "worker":
+		return cmdWorker(rest)
 	case "init":
 		return cmdInit(rest)
 	case "uninstall":
@@ -161,6 +165,22 @@ func cmdHook(args []string) int {
 	default:
 		fmt.Fprintf(os.Stderr, "hook: unknown phase %q (want pre-tool|post-tool)\n", args[0])
 		return 2
+	}
+	return 0
+}
+
+// cmdWorker runs the worker MCP server on stdio: the OPTION-2 offload mechanism.
+// Claude Code (or any MCP client) spawns this via the generated mcp-config and
+// calls its `implement` tool; the tool runs an agentic loop on the configured
+// worker endpoint. Because it is a separate process, that inference egresses to
+// the worker by construction — the base-URL proxy is not involved. Config is read
+// fresh from the current scope; the worker endpoint is bring-your-own.
+func cmdWorker(args []string) int {
+	fs := flag.NewFlagSet("worker", flag.ExitOnError)
+	_ = fs.Parse(args)
+	if err := worker.Serve(config.Load(), os.Stdin, os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, "worker:", err)
+		return 1
 	}
 	return 0
 }

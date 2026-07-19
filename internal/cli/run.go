@@ -49,12 +49,23 @@ func cmdRun(args []string) int {
 		waitPort(addr, 10*time.Second)
 	}
 
-	cmd := exec.Command(args[0], args[1:]...)
+	// When launching claude, register the worker MCP server (Option 2 offload) via
+	// --mcp-config so `mcp__worker__implement` is available. This adds to — does not
+	// replace — the user's own MCP servers (no --strict-mcp-config).
+	launch := append([]string{}, args...)
+	if filepath.Base(launch[0]) == "claude" {
+		if mcp := filepath.Join(config.Load().DataDir, "mcp.json"); fileExists(mcp) {
+			launch = append([]string{launch[0], "--mcp-config", mcp}, launch[1:]...)
+		}
+	}
+
+	cmd := exec.Command(launch[0], launch[1:]...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	cmd.Env = append(os.Environ(),
-		"ANTHROPIC_BASE_URL="+baseURL,
-		"CLAUDE_CODE_SUBAGENT_MODEL=haiku", // pins subagents to the worker leg
-	)
+	// No subagent-model pin: on CC 2.1.214 native subagents run in-process and
+	// never reach the base-URL proxy, so pinning them was a no-op. Offload is now
+	// the worker MCP tool (ticket P9); MAIN is steered to it by the force-delegate
+	// hook, which denies subagent spawns outright.
+	cmd.Env = append(os.Environ(), "ANTHROPIC_BASE_URL="+baseURL)
 	// Terminal-backend agent teams (tmux/iterm2) spawn each teammate as a fresh
 	// claude with no agent_id in its hook payloads; point their launcher at us so
 	// teammate-exec can stamp the identity + worker-tier model. The default

@@ -118,15 +118,15 @@ func cmdInit(args []string) int {
 	}
 	fmt.Println("wrote worker subagent", agentPath)
 
-	// 4. MCP toolbelt (worker-side knowledge/search) — only if configured.
-	if *knowledgeURL != "" || *searchURL != "" {
-		mcpPath := filepath.Join(dataDir, "mcp.json")
-		if err := os.WriteFile(mcpPath, []byte(renderMCP(*knowledgeURL, *searchURL)), 0o644); err != nil {
-			fmt.Fprintln(os.Stderr, "init: mcp:", err)
-			return 1
-		}
-		fmt.Println("wrote MCP toolbelt", mcpPath)
+	// 4. MCP config: always register the worker MCP server (the Option-2 offload
+	// tool `mcp__worker__implement`); add the optional knowledge/search toolbelt
+	// when configured. `run` passes this file to claude via --mcp-config.
+	mcpPath := filepath.Join(dataDir, "mcp.json")
+	if err := os.WriteFile(mcpPath, []byte(renderMCP(*knowledgeURL, *searchURL)), 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, "init: mcp:", err)
+		return 1
 	}
+	fmt.Println("wrote MCP config (worker + toolbelt)", mcpPath)
 
 	// 5. OS service (optional): supervise `serve` across reboots.
 	if *svc {
@@ -190,7 +190,17 @@ func renderConfigEnv(v configEnvVals) string {
 }
 
 func renderMCP(knowledgeURL, searchURL string) string {
-	servers := map[string]any{}
+	servers := map[string]any{
+		// The worker MCP server is the Option-2 offload mechanism: CC spawns
+		// `rig-move-llm worker` on stdio and calls its `implement` tool, whose
+		// agentic loop runs on the configured worker endpoint (guaranteed egress,
+		// independent of CC's in-process agent runtime — see ticket P9).
+		"worker": map[string]any{
+			"type":    "stdio",
+			"command": "rig-move-llm",
+			"args":    []string{"worker"},
+		},
+	}
 	if knowledgeURL != "" {
 		servers["knowledge"] = map[string]string{"type": "sse", "url": knowledgeURL}
 	}
@@ -226,7 +236,9 @@ func wireSettings(path, backupPath string) error {
 			"hooks":   []any{map[string]any{"type": "command", "command": "rig-move-llm hook pre-tool"}},
 		}},
 		"PostToolUse": []any{map[string]any{
-			"matcher": "Task|Agent",
+			// Gate on the worker MCP tool return (Option 2) and on legacy/teammate
+			// Task/Agent returns.
+			"matcher": "Task|Agent|mcp__worker__implement",
 			"hooks":   []any{map[string]any{"type": "command", "command": "rig-move-llm hook post-tool", "timeout": 600}},
 		}},
 	}

@@ -8,7 +8,7 @@
 
 On a subscription, the only lever is **paid-agent output tokens**. `rig-move-llm`:
 
-- **Routes** subagent (worker) inference to *your* endpoint; the main agent stays on Anthropic direct.
+- **Offloads** every code change to a worker tool (`mcp__worker__implement`) that runs on *your* endpoint, out-of-process; the main agent stays on Anthropic direct and only plans/reviews.
 - **Forces delegation** structurally — the paid agent plans/reviews only; a hook denies it the mutating/heavy tools so the work goes to the free/cheap worker.
 - **Gates the result** deterministically (frozen fail-before repro + compile/lint floor + scoped regression) so a "cheaper" answer can't be a wrong answer.
 - **Brings your own model** — local (free compute) or API (cheap, not free). Nothing points at anyone else's compute.
@@ -55,12 +55,6 @@ sides, worker = a local 27B model, delegation enforced 100% with zero leaks):
   etc.) is *cheaper, not free*: you pay per token, typically well below Claude output
   rates, and tool-call/streaming support varies by upstream model (which can affect
   how much actually gets delegated).
-- **Fallback and %-budget can burn real quota.** A `passthrough` endpoint in
-  `workers.json` (and any tier you explicitly route to `passthrough`) sends
-  worker-tier requests to the paid upstream while your workers are down, and
-  `CUSTOM_SUBAGENT_USAGE` below 100 deliberately diverts a share of worker-tier
-  traffic there for quality. Every such request is logged as `routed: "diverted"`
-  so your savings numbers stay truthful. Default config never does either.
 - **Variance disclosure.** Worker patches vary run-to-run (we observed two equivalent
   patches differing by one line with different hidden-test outcomes). With arbitrary
   user endpoints the variance is larger. We therefore claim the *cost floor* and
@@ -70,11 +64,18 @@ sides, worker = a local 27B model, delegation enforced 100% with zero leaks):
 ## Architecture (one binary)
 
 ```
-Claude Code ──> rig-move-llm ──┬─ main agent   ─> api.anthropic.com   (raw passthrough, OAuth untouched)
-              (ANTHROPIC_BASE_URL)  └─ worker (subagent) ─> your endpoint  (Anthropic <-> OpenAI translation, streaming)
+Claude Code ──> rig-move-llm proxy ─> api.anthropic.com   (main leg: raw passthrough, OAuth untouched, usage metered)
+     │          (ANTHROPIC_BASE_URL)
+     └─ mcp__worker__implement ─────> your endpoint         (worker leg: out-of-process MCP tool, Anthropic<->OpenAI, off the paid ledger)
 ```
 
-The daemon replaces what previously needed a Node shim **and** Python LiteLLM — a single static Go binary, stdlib-only, cross-compiles to macOS / Linux / Windows (amd64 + arm64) with zero toolchain.
+The offload runs through a worker MCP tool, not the proxy: on Claude Code 2.1.x native
+subagents run in-process and never egress to a base-URL proxy, so the main agent delegates
+code work to `mcp__worker__implement` (out-of-process, guaranteed to reach your worker
+endpoint). The proxy is the **main-leg observability layer** — it forwards the paid traffic
+verbatim and meters what it spends. One static Go binary, stdlib-only, replaces what
+previously needed a Node shim **and** Python LiteLLM; cross-compiles to macOS / Linux /
+Windows (amd64 + arm64) with zero toolchain.
 
 ## Configuration (bring-your-own endpoint)
 
@@ -88,56 +89,24 @@ PORT=4000
 
 Install **local** (this project only) or **global** (all projects) via the `init` bootstrap.
 
-### Fallback chain (workers.json)
-
-For more than one worker endpoint, add a `workers.json` next to `config.env`
-(local or global scope; local replaces global wholesale). It overrides the
-`WORKER_*` values with a priority chain — on connection failure, header timeout,
-408/429 or 5xx the next endpoint is tried, and a failed endpoint is skipped for
-30 s (health gate) so a down worker costs one timeout, not one per request:
-
-```json
-{
-  "endpoints": [
-    { "name": "local",  "backend": "ollama", "model": "qwen2.5-coder:32b", "priority": 1 },
-    { "name": "cloud",  "backend": "openrouter", "model": "qwen/qwen-2.5-coder-32b-instruct",
-      "key": "sk-or-...", "priority": 2 },
-    { "passthrough": true, "priority": 9 }
-  ]
-}
-```
-
-A `passthrough` entry is an honest last resort: it sends worker-tier requests to
-the paid Anthropic upstream while your workers are down (logged as
-`routed: "diverted"` in the stats, so savings numbers stay truthful). The file
-can hold API keys — create it yourself with `chmod 0600`; it is never
-auto-created.
-
-### %-budget alternation (CUSTOM_SUBAGENT_USAGE)
-
-`CUSTOM_SUBAGENT_USAGE=N` (1-99) targets a token mix instead of an all-or-nothing
-route: over a sliding 15-minute window, when your worker's share of worker-tier
-tokens (input+output) is at or above N%, the next worker-tier request is diverted
-to the paid Anthropic upstream — trading quota for frontier-model quality on a
-slice of the delegated work. **This mode deliberately burns quota.** Every
-diverted request is logged as `routed: "diverted"` with `endpoint: "budget"`, so
-`stats --history` reproduces exactly what you paid for. An empty window routes to
-your worker (never burns quota on missing data). The default (unset or `100`)
-never diverts and is byte-identical to not having the feature.
-
 ## Install & use
 
 ```sh
 npx rig-move-llm@latest init      # auto-detects a local Ollama/llama.cpp; wires this project
-npx rig-move-llm run -- claude     # launch Claude Code with the proxy in place
+claude                             # plain Claude Code — auto-delegates to the worker, no flags
 ```
 
-`init` writes `.rig-move-llm/config.env` and wires Claude Code (hooks + a `rig-worker`
-subagent + optional knowledge/search MCP), probing `localhost:11434` (Ollama) and `:8080`
-(llama.cpp) so config is near-zero. Add `--global` to install for every project
-(`~/.claude` + `~/.rig-move-llm`); local overrides global. `run` sets `ANTHROPIC_BASE_URL`
-for that process only (so local scope never leaks) and starts the proxy if it isn't up.
-Reverse everything with `rig-move-llm uninstall` (restores your `settings.json` verbatim).
+`init` auto-wires Claude Code so a **plain `claude`** (no flags, no wrapper) offloads to the
+worker: it writes a project-root `.mcp.json` (the `mcp__worker__implement` tool, auto-discovered),
+pre-approves it in `.claude/settings.json` (`enableAllProjectMcpServers`, so headless `-p` does not
+hang on the trust prompt), installs the force-delegate + gate hooks, and drops a terse
+plan→delegate→review output style (`.claude/output-styles/rig-delegate.md`) that keeps the paid
+agent's output small. It also writes `.rig-move-llm/config.env`, probing `localhost:11434` (Ollama)
+and `:8080` (llama.cpp) so config is near-zero. Add `--global` for every project (`~/.claude` +
+`~/.rig-move-llm`); local overrides global. `rig-move-llm run -- claude` remains available when you
+also want the proxy's per-project routing / observability on the main leg (it sets
+`ANTHROPIC_BASE_URL` for that process only, so local scope never leaks). Reverse everything with
+`rig-move-llm uninstall` (restores your `settings.json` verbatim).
 
 The npm package ships a single prebuilt static binary per platform via
 `optionalDependencies` (the esbuild/biome pattern — no postinstall download).
@@ -145,18 +114,12 @@ The npm package ships a single prebuilt static binary per platform via
 ### Permissions posture (headless)
 
 Claude Code's auto-mode runs a model-based safety classifier before auto-approving
-Bash commands. That classifier call rides the same rerouted tier as the worker — so
-if your worker is down and you have no fallback chain, auto-mode can stall waiting
-for it. Two supported answers:
-
-- **Fallback chain** (`workers.json` above) — the classifier always has an endpoint
-  to answer from; a `passthrough` entry guarantees it even with all workers down.
-- **Headless allowlist/bypass permissions** — in a headless hybrid run the main agent
-  is already structurally denied mutating tools by the rig hook, and the worker runs
-  on *your* machine against *your* endpoint, so the model classifier is a redundant
-  layer there. If you turn it off, understand what that means: you are trusting the
-  hook + your own sandboxing instead of a second model opinion. Do this only for
-  unattended runs in an environment you'd let a CI job loose in.
+Bash commands. In a headless hybrid run the main agent is already structurally denied
+mutating tools by the rig hook, and the worker's own tools run out-of-process on *your*
+endpoint — so the classifier is a redundant layer on the main leg. If you turn it off
+(headless allowlist / bypass permissions), understand what that means: you are trusting
+the hook + your own sandboxing instead of a second model opinion. Do this only for
+unattended runs in an environment you'd let a CI job loose in.
 
 Subcommands:
 
@@ -194,7 +157,8 @@ pin the teammate to the worker tier so its inference runs on your endpoint. Set
 cmd/rig-move-llm/   entrypoint
 internal/cli/       subcommand dispatch (serve/hook/init/run/stats)
 internal/service/   OS supervision (launchd / systemd --user / Task Scheduler), stdlib-only
-internal/proxy/     the routing core (main-leg passthrough + worker-leg translation)
+internal/proxy/     main-leg observability (raw Anthropic passthrough + usage metering)
+internal/worker/    the worker MCP tool (mcp__worker__implement): agentic loop on your endpoint
 internal/hook/      force-delegate + deterministic-gate hooks (Go, no shell)
 internal/config/    layered .env config + backend registry (Ollama first-class)
 pkg/translate/      Anthropic <-> OpenAI translation library (importable, 27 conformance tests)

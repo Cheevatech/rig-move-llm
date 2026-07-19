@@ -1,10 +1,18 @@
-// Package proxy is the rig-move-llm routing core. It sits at ANTHROPIC_BASE_URL
-// and splits Claude Code's traffic in two legs:
+// Package proxy is the rig-move-llm observability layer. It sits at
+// ANTHROPIC_BASE_URL and forwards Claude Code's traffic verbatim to the paid
+// Anthropic upstream (OAuth / anthropic-beta headers preserved, streamed
+// unbuffered), tee-scanning completions for token usage so the ledger can report
+// what the paid (MAIN) leg spent.
 //
-//   - worker leg  (inbound model matches "haiku"): Anthropic Messages ->
-//     OpenAI Chat translation -> the user's worker endpoint -> translated back.
-//   - main leg    (everything else): verbatim byte passthrough to the paid
-//     Anthropic upstream, preserving OAuth / anthropic-beta headers and streaming.
+// It is MAIN-leg only. Offload to a worker model is NOT done here: on CC 2.1.x
+// native subagents run in-process and never egress to a base-URL proxy, so the
+// old worker leg (haiku-model interception -> OpenAI translation -> local worker)
+// could never see real subagent traffic and was removed in ticket P10-B. Offload
+// now runs out-of-process through the worker MCP tool (mcp__worker__implement,
+// internal/worker), whose token cost is off the paid ledger by construction.
+//
+// Per-project routing (the /p/<id> path prefix, allowlist-gated) still applies:
+// it selects which project's config/upstream a request uses.
 package proxy
 
 import (
@@ -15,52 +23,21 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/Cheevatech/rig-move-llm/internal/config"
 	"github.com/Cheevatech/rig-move-llm/internal/stats"
-	"github.com/Cheevatech/rig-move-llm/pkg/translate"
 )
-
-var haikuRe = regexp.MustCompile(`(?i)haiku`)
-
-// budgetWindow is the sliding window over which the L4 %-budget alternation
-// measures the custom worker's token share (var so tests can widen/shrink it).
-var budgetWindow = 15 * time.Minute
-
-// budgetEndpoint labels log entries diverted by the %-budget, so they are
-// distinguishable from L2 passthrough-fallback diverts in requests.jsonl.
-const budgetEndpoint = "budget"
 
 // httpClient is shared; no timeout so long streaming responses are not cut off.
 var httpClient = &http.Client{}
-
-// fallbackClient is used for worker attempts when a fallback chain exists: it
-// bounds the time-to-first-byte so a dead endpoint costs seconds, not a hung
-// session, before the next endpoint is tried. Single-endpoint configs keep the
-// timeout-free httpClient — pre-L2 behavior unchanged.
-var fallbackClient = func() *http.Client {
-	tr := http.DefaultTransport.(*http.Transport).Clone()
-	tr.ResponseHeaderTimeout = 30 * time.Second
-	return &http.Client{Transport: tr}
-}()
-
-// healthCooldown is how long a failed worker endpoint is skipped before being
-// retried (var so tests can shrink it). Endpoints in cooldown are still tried
-// as a last resort when every endpoint in the chain is cooling down.
-var healthCooldown = 30 * time.Second
 
 // Server holds the resolved configuration and serves the routing handler.
 type Server struct {
 	cfg     config.Config
 	rec     *stats.Recorder // observability recorder; nil disables recording
 	httpSrv *http.Server
-
-	healthMu  sync.Mutex
-	unhealthy map[string]time.Time // endpoint label -> when it last failed
 }
 
 // New builds a Server from resolved configuration. It opens the observability
@@ -88,8 +65,8 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) ListenAndServe() error {
 	s.rec.StartFlusher(5 * time.Second)
 	addr := ":" + s.cfg.Port
-	log.Printf("rig-move-llm listening on %s | main=%s worker=%s backend=%s",
-		addr, s.cfg.MainUpstreamURL, s.cfg.WorkerAPIBase, s.cfg.Backend.Name)
+	log.Printf("rig-move-llm listening on %s | main=%s backend=%s",
+		addr, s.cfg.MainUpstreamURL, s.cfg.Backend.Name)
 	s.httpSrv = &http.Server{Addr: addr, Handler: s.Handler()}
 	return s.httpSrv.ListenAndServe()
 }
@@ -147,66 +124,41 @@ func (s *Server) resolveProject(w http.ResponseWriter, r *http.Request) (cfg con
 	return cfg, canon, true
 }
 
-// handle routes the request between the worker leg (OpenAI translation) and the
-// main leg (raw Anthropic passthrough), based on the JSON body's "model".
-//
-// NOTE (ticket P9 / Option 2): the worker leg is now VESTIGIAL for real CC
-// traffic. On CC 2.1.214 native subagents run in-process and never egress here,
-// and the subagent-model pin was removed, so no "haiku"-model request arrives in
-// normal use (a normal main model — opus/sonnet — never matches haikuRe and
-// passes through untouched). Offload moved to the worker MCP tool
-// (mcp__worker__implement). The worker-leg code + its L2 fallback / L4 %-budget
-// are retained deliberately: they are the machinery a future re-integration of
-// per-project routing/budget onto the worker path will reuse (deferred in P9).
-// Full removal is a separate, larger cleanup — not this slice.
+// handle forwards every request to the paid Anthropic upstream. POST /v1/messages
+// is tee-scanned for token usage and folded into the ledger; other paths
+// (count_tokens, GET, etc.) are non-billable passthrough and skip the scanner.
 func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	cfg, project, ok := s.resolveProject(w, r)
 	if !ok {
 		return
 	}
 
-	// Only POST /v1/messages (optionally with ?beta=) is eligible for the worker
-	// leg. Everything else (count_tokens, other paths, GET, etc.) is passthrough.
-	isMessages := r.Method == http.MethodPost && r.URL.Path == "/v1/messages"
-
-	if isMessages {
+	if r.Method == http.MethodPost && r.URL.Path == "/v1/messages" {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_request_error", "could not read request body")
 			return
 		}
-		// Peek at the model field without fully committing to a struct.
+		// Peek at the model field for the log/ledger without committing to a struct.
 		var peek struct {
 			Model string `json:"model"`
 		}
 		_ = json.Unmarshal(body, &peek)
-
-		if haikuRe.MatchString(peek.Model) {
-			logReq(r.Method, r.URL.Path, peek.Model, "WORKER")
-			s.handleWorker(w, r, cfg, project, body, peek.Model)
-			return
-		}
-		// Non-haiku: passthrough, but we already consumed the body.
 		logReq(r.Method, r.URL.Path, peek.Model, "MAIN")
-		s.handleMain(w, r, cfg, project, body, peek.Model, true, stats.RoutedMain, "")
+		s.handleMain(w, r, cfg, project, body, peek.Model, true)
 		return
 	}
 
 	logReq(r.Method, r.URL.Path, "", "MAIN")
 	body, _ := io.ReadAll(r.Body)
-	// Non-message passthrough (count_tokens, GET, etc.) is not a billable
-	// completion; stream it but do not fold it into the token ledger.
-	s.handleMain(w, r, cfg, project, body, "", false, stats.RoutedMain, "")
+	s.handleMain(w, r, cfg, project, body, "", false)
 }
 
 // handleMain performs a verbatim byte passthrough to MAIN_UPSTREAM_URL,
 // preserving all auth headers and streaming the response unbuffered. When record
 // is true the upstream response is tee-scanned for Anthropic token usage and
-// folded into the billed (MAIN) ledger — without buffering the stream. routed
-// and endpoint annotate the log entry: a worker-tier request diverted here by
-// the L2 passthrough fallback carries RoutedDiverted so it never masquerades as
-// a genuine main-agent call in the accounting.
-func (s *Server) handleMain(w http.ResponseWriter, r *http.Request, cfg config.Config, project string, body []byte, model string, record bool, routed, endpoint string) {
+// folded into the billed (MAIN) ledger — without buffering the stream.
+func (s *Server) handleMain(w http.ResponseWriter, r *http.Request, cfg config.Config, project string, body []byte, model string, record bool) {
 	start := time.Now()
 	if cfg.MainUpstreamURL == "" {
 		writeError(w, http.StatusBadGateway, "api_error", "MAIN_UPSTREAM_URL is not configured")
@@ -298,8 +250,7 @@ func (s *Server) handleMain(w http.ResponseWriter, r *http.Request, cfg config.C
 		s.rec.Record(stats.Record{
 			Leg:       stats.LegMain,
 			Project:   project,
-			Endpoint:  endpoint,
-			Routed:    routed,
+			Routed:    stats.RoutedMain,
 			Model:     model,
 			InTokens:  in,
 			OutTokens: out,
@@ -308,255 +259,6 @@ func (s *Server) handleMain(w http.ResponseWriter, r *http.Request, cfg config.C
 			ReqBody:   body,
 		})
 	}
-}
-
-// workerChain returns the fallback chain for this request: the workers.json
-// chain when present, otherwise a single endpoint synthesized from the scalar
-// WORKER_* config (pre-L2 behavior, byte-identical).
-func workerChain(cfg config.Config) []config.WorkerEndpoint {
-	if len(cfg.Workers) > 0 {
-		return cfg.Workers
-	}
-	if cfg.WorkerAPIBase == "" {
-		return nil
-	}
-	return []config.WorkerEndpoint{{
-		Base:    cfg.WorkerAPIBase,
-		Key:     cfg.WorkerAPIKey,
-		Model:   cfg.WorkerModel,
-		Backend: cfg.Backend,
-	}}
-}
-
-// healthOrder reorders the chain so endpoints in failure cooldown sort after
-// healthy ones (each group keeps its priority order). Cooling endpoints are
-// kept, not dropped: if every endpoint is down they are still the best bet.
-func (s *Server) healthOrder(chain []config.WorkerEndpoint) []config.WorkerEndpoint {
-	s.healthMu.Lock()
-	defer s.healthMu.Unlock()
-	now := time.Now()
-	healthy := make([]config.WorkerEndpoint, 0, len(chain))
-	var cooling []config.WorkerEndpoint
-	for _, ep := range chain {
-		if t, ok := s.unhealthy[ep.Label()]; ok && now.Sub(t) < healthCooldown {
-			cooling = append(cooling, ep)
-		} else {
-			healthy = append(healthy, ep)
-		}
-	}
-	return append(healthy, cooling...)
-}
-
-func (s *Server) markUnhealthy(label string) {
-	s.healthMu.Lock()
-	defer s.healthMu.Unlock()
-	if s.unhealthy == nil {
-		s.unhealthy = map[string]time.Time{}
-	}
-	s.unhealthy[label] = time.Now()
-}
-
-func (s *Server) markHealthy(label string) {
-	s.healthMu.Lock()
-	defer s.healthMu.Unlock()
-	delete(s.unhealthy, label)
-}
-
-// retryableStatus reports whether a worker HTTP status is an availability
-// problem worth falling back on (as opposed to a request problem the next
-// endpoint would reject identically).
-func retryableStatus(code int) bool {
-	return code == http.StatusRequestTimeout || code == http.StatusTooManyRequests || code >= 500
-}
-
-// handleWorker walks the health-ordered fallback chain: each endpoint is tried
-// in turn until one serves the request, a passthrough entry diverts it to the
-// paid main upstream, or the chain is exhausted. With a single endpoint the
-// behavior (client, timeouts, errors) is exactly the pre-L2 worker leg.
-func (s *Server) handleWorker(w http.ResponseWriter, r *http.Request, cfg config.Config, project string, body []byte, inboundModel string) {
-	chain := workerChain(cfg)
-	if len(chain) == 0 {
-		writeError(w, http.StatusBadGateway, "api_error", "WORKER_API_BASE is not configured")
-		return
-	}
-
-	var areq translate.AnthropicRequest
-	if err := json.Unmarshal(body, &areq); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request_error", "could not parse Anthropic request: "+err.Error())
-		return
-	}
-
-	// L4 %-budget alternation (opt-in via CUSTOM_SUBAGENT_USAGE 1-99): keep the
-	// custom worker's share of worker-tier tokens over the sliding window near
-	// the target by diverting to the paid upstream whenever the share is at or
-	// above it. An empty window and a disabled recorder both route custom
-	// (fail-cheap: missing data must not burn quota). The unset/100 default
-	// skips this block entirely — pre-L4 byte-identical.
-	if n := cfg.CustomSubagentUsage; n >= 1 && n <= 99 && s.rec != nil {
-		workerTok, divertedTok := s.rec.WindowTokens(budgetWindow)
-		if total := workerTok + divertedTok; total > 0 && workerTok*100 >= int64(n)*total {
-			log.Printf("worker budget: custom share %d%% >= target %d%%, diverting %q to main upstream",
-				workerTok*100/total, n, inboundModel)
-			s.handleMain(w, r, cfg, project, body, inboundModel, true, stats.RoutedDiverted, budgetEndpoint)
-			return
-		}
-	}
-
-	hasFallback := len(chain) > 1
-	var lastStatus int
-	var lastBody []byte
-	var lastErr error
-	for _, ep := range s.healthOrder(chain) {
-		if ep.Passthrough {
-			// Honest quota burn while workers are down: billed on MAIN but tagged
-			// diverted so savings math can tell it apart from real main traffic.
-			log.Printf("worker chain: diverting %q to main upstream (endpoint %s)", inboundModel, ep.Label())
-			s.handleMain(w, r, cfg, project, body, inboundModel, true, stats.RoutedDiverted, ep.Label())
-			return
-		}
-		handled, status, errBody, err := s.tryWorker(w, r, cfg, project, ep, areq, body, inboundModel, hasFallback)
-		if handled {
-			return
-		}
-		lastStatus, lastBody, lastErr = status, errBody, err
-		s.markUnhealthy(ep.Label())
-		if err != nil {
-			log.Printf("worker chain: endpoint %s failed (%v), falling back", ep.Label(), err)
-		} else {
-			log.Printf("worker chain: endpoint %s returned %d, falling back", ep.Label(), status)
-		}
-	}
-
-	// Chain exhausted: surface the last failure in Anthropic error shape.
-	if lastErr != nil {
-		writeError(w, http.StatusBadGateway, "api_error", "all worker endpoints failed; last error: "+lastErr.Error())
-		return
-	}
-	aerr := translate.TranslateError(lastStatus, lastBody)
-	out, _ := json.Marshal(aerr)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusBadGateway)
-	_, _ = w.Write(out)
-}
-
-// tryWorker attempts one endpoint. handled=true means a response was written to
-// the client (success, or a failure not worth retrying elsewhere). Otherwise
-// nothing was written and status/errBody/err describe the retryable failure.
-func (s *Server) tryWorker(w http.ResponseWriter, r *http.Request, cfg config.Config, project string, ep config.WorkerEndpoint, areq translate.AnthropicRequest, body []byte, inboundModel string, hasFallback bool) (handled bool, status int, errBody []byte, err error) {
-	start := time.Now()
-
-	model := ep.Model
-	if model == "" {
-		model = cfg.WorkerModel
-	}
-	oreq := translate.RequestAnthropicToOpenAI(areq, model)
-	// Backend quirk: some servers reject stream_options.
-	if ep.Backend.DropStreamOptions {
-		oreq.StreamOptions = nil
-	}
-	oBody, err := json.Marshal(oreq)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "api_error", "failed to encode worker request: "+err.Error())
-		return true, 0, nil, nil
-	}
-
-	target := ep.Base + "/chat/completions"
-	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, target, bytes.NewReader(oBody))
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "api_error", "failed to build worker request: "+err.Error())
-		return true, 0, nil, nil
-	}
-	upReq.Header.Set("Content-Type", "application/json")
-	upReq.Header.Set("Accept", "application/json")
-	if ep.Key != "" {
-		upReq.Header.Set("Authorization", "Bearer "+ep.Key)
-	}
-	for k, v := range ep.Backend.ExtraHeaders {
-		upReq.Header.Set(k, v)
-	}
-
-	// With a fallback available, bound time-to-first-byte so a dead endpoint
-	// moves on in seconds; single-endpoint keeps the timeout-free client.
-	client := httpClient
-	if hasFallback {
-		client = fallbackClient
-	}
-	resp, err := client.Do(upReq)
-	if err != nil {
-		if hasFallback {
-			return false, 0, nil, err
-		}
-		writeError(w, http.StatusBadGateway, "api_error", "worker upstream request failed: "+err.Error())
-		return true, 0, nil, nil
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		eb, _ := io.ReadAll(resp.Body)
-		if hasFallback && retryableStatus(resp.StatusCode) {
-			return false, resp.StatusCode, eb, nil
-		}
-		aerr := translate.TranslateError(resp.StatusCode, eb)
-		out, _ := json.Marshal(aerr)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadGateway)
-		_, _ = w.Write(out)
-		return true, 0, nil, nil
-	}
-
-	s.markHealthy(ep.Label())
-
-	if areq.Stream {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
-		w.WriteHeader(http.StatusOK)
-		usage, _ := translate.StreamOpenAIToAnthropicUsage(w, resp.Body, inboundModel)
-		s.rec.Record(stats.Record{
-			Leg:       stats.LegWorker,
-			Project:   project,
-			Endpoint:  ep.Label(),
-			Routed:    stats.RoutedWorker,
-			Model:     inboundModel,
-			InTokens:  usage.InputTokens,
-			OutTokens: usage.OutputTokens,
-			Millis:    time.Since(start).Milliseconds(),
-			Status:    http.StatusOK,
-			ReqBody:   body,
-		})
-		return true, 0, nil, nil
-	}
-
-	// Non-streaming.
-	oRespBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "api_error", "failed to read worker response: "+err.Error())
-		return true, 0, nil, nil
-	}
-	var oResp translate.OpenAIResponse
-	if err := json.Unmarshal(oRespBody, &oResp); err != nil {
-		writeError(w, http.StatusBadGateway, "api_error", "failed to parse worker response: "+err.Error())
-		return true, 0, nil, nil
-	}
-	aResp := translate.ResponseOpenAIToAnthropic(oResp, inboundModel)
-	out, _ := json.Marshal(aResp)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(out)
-	s.rec.Record(stats.Record{
-		Leg:       stats.LegWorker,
-		Project:   project,
-		Endpoint:  ep.Label(),
-		Routed:    stats.RoutedWorker,
-		Model:     inboundModel,
-		InTokens:  aResp.Usage.InputTokens,
-		OutTokens: aResp.Usage.OutputTokens,
-		Millis:    time.Since(start).Milliseconds(),
-		Status:    http.StatusOK,
-		ReqBody:   body,
-		RespBody:  out,
-	})
-	return true, 0, nil, nil
 }
 
 // writeError emits an Anthropic-shaped error envelope.

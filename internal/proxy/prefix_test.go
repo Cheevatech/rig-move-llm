@@ -16,30 +16,34 @@ import (
 	"github.com/Cheevatech/rig-move-llm/internal/stats"
 )
 
-const workerReply = `{"id":"x","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`
+// anthropicReply is a minimal non-stream Anthropic message with usage, enough for
+// handleMain's scanner to fold into the ledger.
+const anthropicReply = `{"type":"message","role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":1,"output_tokens":1}}`
 
 // TestProjectPrefixRouting drives the /p/<id> path prefix end to end: a
 // registered project's local config wins per request (and re-reads fresh on
 // edit), an unregistered or malformed id fails closed, and the request log
 // carries the project field while stats stay in the daemon's global scope.
+// Per-project selection is observed on the MAIN leg — each project points its
+// MAIN_UPSTREAM_URL at a different stub upstream.
 func TestProjectPrefixRouting(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	var hitsA, hitsB atomic.Int64
-	workerA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstreamA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hitsA.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, workerReply)
+		io.WriteString(w, anthropicReply)
 	}))
-	defer workerA.Close()
-	workerB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	defer upstreamA.Close()
+	upstreamB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hitsB.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, workerReply)
+		io.WriteString(w, anthropicReply)
 	}))
-	defer workerB.Close()
+	defer upstreamB.Close()
 
-	// A registered project whose local config points at worker A.
+	// A registered project whose local config points at upstream A.
 	proj, err := config.CanonicalPath(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -49,26 +53,26 @@ func TestProjectPrefixRouting(t *testing.T) {
 		t.Fatal(err)
 	}
 	localCfg := filepath.Join(localDir, config.ConfigFile)
-	if err := os.WriteFile(localCfg, []byte("WORKER_API_BASE="+workerA.URL+"/v1\n"), 0o600); err != nil {
+	if err := os.WriteFile(localCfg, []byte("MAIN_UPSTREAM_URL="+upstreamA.URL+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := config.RegisterProject(proj); err != nil {
 		t.Fatal(err)
 	}
 
-	// The daemon boots with worker B (its global-scope view).
+	// The daemon boots with upstream B (its global-scope view).
 	dataDir := t.TempDir()
 	rec, err := stats.NewRecorder(dataDir, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &Server{cfg: config.Config{WorkerAPIBase: workerB.URL + "/v1", DataDir: dataDir}, rec: rec}
+	s := &Server{cfg: config.Config{MainUpstreamURL: upstreamB.URL, DataDir: dataDir}, rec: rec}
 	h := s.Handler()
 
-	body := `{"model":"claude-haiku-4-5","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
+	body := `{"model":"claude-sonnet-5","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
 	id := config.EncodeProjectID(proj)
 
-	// Prefixed request → the project's own worker (A), not the boot config (B).
+	// Prefixed request → the project's own upstream (A), not the boot config (B).
 	if code := postPath(t, h, "/p/"+id+"/v1/messages", body); code != http.StatusOK {
 		t.Fatalf("prefixed request status %d", code)
 	}
@@ -85,7 +89,7 @@ func TestProjectPrefixRouting(t *testing.T) {
 	}
 
 	// Config edit is honored on the very next request (no cache).
-	if err := os.WriteFile(localCfg, []byte("WORKER_API_BASE="+workerB.URL+"/v1\n"), 0o600); err != nil {
+	if err := os.WriteFile(localCfg, []byte("MAIN_UPSTREAM_URL="+upstreamB.URL+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if code := postPath(t, h, "/p/"+id+"/v1/messages", body); code != http.StatusOK {

@@ -25,19 +25,8 @@ type Config struct {
 	MainUpstreamURL string // e.g. https://api.anthropic.com
 	WorkerAPIBase   string // e.g. http://host:8000/v1 (already includes /v1)
 	WorkerAPIKey    string
-	WorkerModel     string // overrides the inbound haiku model when talking to the worker
+	WorkerModel     string // model name the worker MCP tool sends to the worker endpoint
 	Backend         Backend
-	// Workers is the optional multi-endpoint fallback chain from workers.json
-	// (priority-sorted). Empty means the scalar Worker* fields above are the
-	// single endpoint — the pre-L2 behavior, unchanged.
-	Workers []WorkerEndpoint
-	// CustomSubagentUsage is the L4 %-budget: the target share (1-99) of
-	// worker-tier tokens served by the custom worker over a sliding window;
-	// requests above the target are diverted to the paid upstream (logged as
-	// routed=diverted). 100 — the default, and what any out-of-range or
-	// unparsable value falls back to — routes every worker-tier request to the
-	// worker: the pre-L4 behavior, and the direction that never burns quota.
-	CustomSubagentUsage int
 	LogBodies           bool   // opt-in full request/response logging (default: metadata only)
 	LogMaxMB            int    // size cap for logs/requests.jsonl before compaction (default 50)
 	DataDir             string // scope dir where logs/stats are written (resolved local|global)
@@ -115,25 +104,16 @@ func LoadFrom(projectDir string) Config {
 		logMaxMB = n
 	}
 
-	// Only 1-99 enables alternation; 0, 100, and garbage all mean "all custom"
-	// (fail-cheap: a bad value must not silently divert traffic to paid quota).
-	customUsage := 100
-	if n, err := strconv.Atoi(strings.TrimSpace(get("CUSTOM_SUBAGENT_USAGE"))); err == nil && n >= 1 && n <= 99 {
-		customUsage = n
-	}
-
 	return Config{
-		Port:                port,
-		MainUpstreamURL:     strings.TrimRight(get("MAIN_UPSTREAM_URL"), "/"),
-		WorkerAPIBase:       workerBase,
-		WorkerAPIKey:        get("WORKER_API_KEY"),
-		WorkerModel:         get("WORKER_MODEL"),
-		Backend:             backend,
-		Workers:             loadWorkers(projectDir),
-		CustomSubagentUsage: customUsage,
-		LogBodies:           truthy(get("LOG_BODIES")),
-		LogMaxMB:            logMaxMB,
-		DataDir:             dataDir,
+		Port:            port,
+		MainUpstreamURL: strings.TrimRight(get("MAIN_UPSTREAM_URL"), "/"),
+		WorkerAPIBase:   workerBase,
+		WorkerAPIKey:    get("WORKER_API_KEY"),
+		WorkerModel:     get("WORKER_MODEL"),
+		Backend:         backend,
+		LogBodies:       truthy(get("LOG_BODIES")),
+		LogMaxMB:        logMaxMB,
+		DataDir:         dataDir,
 	}
 }
 

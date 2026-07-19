@@ -210,10 +210,7 @@ type configEnvVals struct {
 func renderConfigEnv(v configEnvVals) string {
 	var b strings.Builder
 	b.WriteString("# rig-move-llm config — bring-your-own worker endpoint.\n")
-	b.WriteString("# Precedence: process env > local config.env > global config.env.\n")
-	b.WriteString("# Multi-endpoint fallback: create workers.json next to this file (chmod 0600 —\n")
-	b.WriteString("# it may hold API keys, so it is never auto-created). It replaces the WORKER_*\n")
-	b.WriteString("# values below with a priority chain; see README \"Fallback chain\".\n\n")
+	b.WriteString("# Precedence: process env > local config.env > global config.env.\n\n")
 	kv := func(comment, key, val string) {
 		if comment != "" {
 			b.WriteString("# " + comment + "\n")
@@ -235,7 +232,6 @@ func renderConfigEnv(v configEnvVals) string {
 	kv("set LOG_BODIES=1 to log full request/response bodies (default: metadata only)", "LOG_BODIES", "")
 	kv("size cap in MB for logs/requests.jsonl; past it the oldest half is compacted away (default 50)", "LOG_MAX_MB", "")
 	kv("MCP servers the MAIN agent may still use, comma-separated (default: none)", "MAIN_SHARED_MCP", "")
-	kv("target % of worker-tier tokens served by your worker over a sliding 15 min window; 1-99 diverts the excess to the paid upstream (burns quota, logged routed=diverted); default 100 = always your worker", "CUSTOM_SUBAGENT_USAGE", "")
 	return b.String()
 }
 

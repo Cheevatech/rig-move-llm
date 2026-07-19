@@ -59,6 +59,16 @@ func cmdUninstall(args []string) int {
 	remove(filepath.Join(claudeDir, "agents", "rig-worker.md"))
 	remove(filepath.Join(dataDir, "mcp.json"))
 
+	// Reverse the auto-wire files (P10-A). Project-root .mcp.json is written only for
+	// local scope; the delegate steer is removed only when it is ours (sentinel).
+	if !*global {
+		remove(filepath.Join(".", ".mcp.json"))
+	}
+	removeOwnedSteer(filepath.Join(claudeDir, "CLAUDE.md"))
+	remove(filepath.Join(claudeDir, "output-styles", "rig-delegate.md"))
+	// prune the output-styles dir if we left it empty
+	_ = os.Remove(filepath.Join(claudeDir, "output-styles"))
+
 	if *purge {
 		if err := os.RemoveAll(dataDir); err == nil {
 			fmt.Println("purged", dataDir)
@@ -80,9 +90,19 @@ func stripRigHooks(path string) error {
 	if err := json.Unmarshal(data, &settings); err != nil {
 		return err
 	}
+	// We reach stripRigHooks only when no pre-init backup exists (settings.json was
+	// created fresh by init), so removing our injected keys is safe here.
+	delete(settings, "enableAllProjectMcpServers")
+	if settings["outputStyle"] == "rig-delegate" {
+		delete(settings, "outputStyle")
+	}
 	hooks, ok := settings["hooks"].(map[string]any)
 	if !ok {
-		return nil
+		out, err := json.MarshalIndent(settings, "", "  ")
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(path, append(out, '\n'), 0o644)
 	}
 	for _, phase := range []string{"PreToolUse", "PostToolUse"} {
 		entries, ok := hooks[phase].([]any)
@@ -132,6 +152,18 @@ func mentionsRig(entry any) bool {
 		}
 	}
 	return false
+}
+
+// removeOwnedSteer deletes the delegate-steer CLAUDE.md only if it carries our
+// sentinel, so a user's own memory file is never touched.
+func removeOwnedSteer(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	if strings.Contains(string(data), steerSentinel) {
+		remove(path)
+	}
 }
 
 func remove(path string) {

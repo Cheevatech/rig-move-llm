@@ -85,7 +85,13 @@ Workflow:
 1. Read the relevant files to understand the failure.
 2. Make the minimal edit that fixes it via write_file.
 3. Run the failing test (or the command in the task) with run_bash to verify it now passes.
-4. When the fix is verified, STOP and reply with a one-paragraph summary of what you changed and why.
+4. REGRESSION CHECK — run the FULL test file(s) that cover the code you changed (not just the
+   one failing test). If your change makes a previously-passing test fail (e.g. an existing test
+   that exercises the exact behaviour you just constrained), that test is fallout you must resolve:
+   update it to match the new correct behaviour, or adjust your fix. Do not stop with a
+   self-inflicted new failure.
+5. When the fix is verified AND no new failures remain in the affected test file(s), STOP and reply
+   with a one-paragraph summary of what you changed and why.
 Rules: paths are relative to the repo root. Do not ask questions — act. Do not touch files under .gate/ or .gate.frozen/. Keep edits minimal and scoped to the task.`
 
 // Implement runs the agentic loop for a task against repo. gateDir is advisory

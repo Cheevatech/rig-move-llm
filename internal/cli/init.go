@@ -118,15 +118,65 @@ func cmdInit(args []string) int {
 	}
 	fmt.Println("wrote worker subagent", agentPath)
 
-	// 4. MCP config: always register the worker MCP server (the Option-2 offload
-	// tool `mcp__worker__implement`); add the optional knowledge/search toolbelt
-	// when configured. `run` passes this file to claude via --mcp-config.
+	// 4. MCP config for `run --mcp-config` back-compat: the same worker (+optional
+	// toolbelt) served as a one-off file. Bare `claude` ignores this; it reads the
+	// project-root .mcp.json written in 4b. Kept so `run` still works when a user
+	// wants the proxy/observability leg alongside the offload.
 	mcpPath := filepath.Join(dataDir, "mcp.json")
 	if err := os.WriteFile(mcpPath, []byte(renderMCP(*knowledgeURL, *searchURL)), 0o644); err != nil {
 		fmt.Fprintln(os.Stderr, "init: mcp:", err)
 		return 1
 	}
 	fmt.Println("wrote MCP config (worker + toolbelt)", mcpPath)
+
+	// 4b. Auto-wire so a PLAIN `claude` (no flags, no `run` wrapper) offloads to the
+	// worker. CC auto-discovers a project-root .mcp.json and loads .claude/CLAUDE.md;
+	// the trust prompt for the .mcp.json server is pre-approved by
+	// enableAllProjectMcpServers in settings.json (set in wireSettings) so headless
+	// `-p` does not hang. See memory cc-persistent-autowire-recipe. Project-scoped:
+	// global installs use `run --mcp-config` or a user-scope .mcp.json instead.
+	if !*global {
+		rootMCP := filepath.Join(".", ".mcp.json")
+		if err := os.WriteFile(rootMCP, []byte(renderMCP(*knowledgeURL, *searchURL)), 0o644); err != nil {
+			fmt.Fprintln(os.Stderr, "init: root mcp:", err)
+			return 1
+		}
+		fmt.Println("wrote auto-discovered MCP config", rootMCP)
+	}
+
+	// 4d. Output style = the persistent, SYSTEM-PROMPT-tier terse-delegate workflow.
+	// This is the no-flag equivalent of P9's `--append-system-prompt`: bare `claude`
+	// loads it at session start (confirmed via claude-code-guide, CC 2.1.x). It is
+	// what recovers the token savings — the .claude/CLAUDE.md steer (context tier)
+	// secured delegation but not MAIN verbosity; the output style constrains both.
+	// wireSettings sets "outputStyle" to activate it.
+	stylePath := filepath.Join(claudeDir, "output-styles", "rig-delegate.md")
+	if err := os.MkdirAll(filepath.Dir(stylePath), 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, "init: output-styles dir:", err)
+		return 1
+	}
+	if err := os.WriteFile(stylePath, []byte(outputStyleMD), 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, "init: output style:", err)
+		return 1
+	}
+	fmt.Println("wrote terse-delegate output style", stylePath)
+
+	// 4c. Delegate-only steer. Guidance, not enforcement (the force-delegate
+	// PreToolUse hook is the hard constraint) — it just makes MAIN delegate on the
+	// first try, avoiding the deny round-trip. Never clobber a user's CLAUDE.md:
+	// write only when absent (or already ours).
+	memPath := filepath.Join(claudeDir, "CLAUDE.md")
+	if existing, err := os.ReadFile(memPath); err != nil {
+		if err := os.WriteFile(memPath, []byte(delegateSteerMD), 0o644); err != nil {
+			fmt.Fprintln(os.Stderr, "init: CLAUDE.md:", err)
+			return 1
+		}
+		fmt.Println("wrote delegate steer", memPath)
+	} else if strings.Contains(string(existing), steerSentinel) {
+		fmt.Println("delegate steer already present in", memPath)
+	} else {
+		fmt.Printf("NOTE: %s exists — add the delegate steer manually or see .claude/CLAUDE.md guidance (leaving it untouched)\n", memPath)
+	}
 
 	// 5. OS service (optional): supervise `serve` across reboots.
 	if *svc {
@@ -230,6 +280,16 @@ func wireSettings(path, backupPath string) error {
 		}
 	}
 
+	// Pre-approve the project-root .mcp.json server so headless `claude -p` does not
+	// hang on the MCP trust dialog (see memory cc-persistent-autowire-recipe).
+	settings["enableAllProjectMcpServers"] = true
+
+	// Activate the terse-delegate output style (written by init to
+	// .claude/output-styles/rig-delegate.md) — the system-prompt-tier workflow that
+	// keeps MAIN terse + delegating, recovering the token savings a plain CLAUDE.md
+	// could not (P10). Loaded by bare `claude` at session start; no CLI flag.
+	settings["outputStyle"] = "rig-delegate"
+
 	settings["hooks"] = map[string]any{
 		"PreToolUse": []any{map[string]any{
 			"matcher": "*",
@@ -249,6 +309,59 @@ func wireSettings(path, backupPath string) error {
 	}
 	return os.WriteFile(path, append(out, '\n'), 0o644)
 }
+
+// steerSentinel marks a CLAUDE.md as rig-move-llm-authored so uninstall can remove
+// it without touching a user's own memory file.
+const steerSentinel = "<!-- rig-move-llm:delegate-steer -->"
+
+// outputStyleMD is the terse plan→delegate→review workflow, ported from the proven
+// hybrid-shim --append-system-prompt (which measured −30% billed output vs solo) to
+// reference the mcp__worker__implement offload tool. keep-coding-instructions: true
+// makes it APPEND to CC's default system prompt (append-equivalent), the closest
+// persistent match to that flag. The force-delegate hook remains the hard enforcer;
+// this recovers the savings the hook alone does not (it curbs MAIN verbosity).
+const outputStyleMD = `---
+name: rig-delegate
+description: Terse plan -> delegate to worker -> review orchestrator for the subscription-preserving hybrid.
+keep-coding-instructions: true
+---
+
+You are the MAIN agent in a subscription-preserving hybrid. Your inference is paid;
+the worker (a local/cheap model behind the mcp__worker__implement tool) is free. Your
+job is ONLY:
+
+1. PLAN — understand the task and outline the approach in 1-3 terse sentences.
+2. DELEGATE — hand ALL code changes, file edits, command/test runs, and knowledge/
+   search lookups to the worker by calling the mcp__worker__implement tool with a
+   scoped spec. Do NOT edit files or run commands yourself — those tools are blocked
+   for you by design (a PreToolUse hook denies them). If you catch yourself about to
+   edit or run a test, stop and delegate instead.
+3. REVIEW — read the worker's summary and the gate result. Before closing, confirm the
+   change introduced no NEW test failure: the worker must have run the full test file(s)
+   covering the code it touched and reported them green (not just the one new/target test).
+   If any pre-existing test now fails because of the change (common when the fix constrains
+   behaviour an existing test relied on), that is fallout — re-delegate to fix it. This
+   regression check is NOT optional, even when terse. When it is clean, reply with ONLY a
+   short closing line (files changed + outcome); claim nothing more. You may Read/Grep/Glob
+   to plan and review.
+
+Be terse in every message: a brief plan, the delegation, a brief review. No verbose
+explanations, no restating the task, no narrating what you are about to do. Prefer
+delegating on the first try to avoid wasted round-trips.
+`
+
+const delegateSteerMD = steerSentinel + `
+# Delegation
+
+This project runs a subscription-preserving hybrid: heavy code work is offloaded to
+a local/cheap worker model, keeping the paid main-leg budget for planning and review.
+
+**Delegate ALL code implementation to the ` + "`mcp__worker__implement`" + ` tool.** Do not edit
+files, run tests, or run shell commands yourself — hand the scoped task to the worker
+tool, which edits files, runs the project's real tests as its gate, and reports back.
+Plan and review here; implement there. (A PreToolUse hook enforces this — delegating
+on the first try just avoids the deny round-trip.)
+`
 
 const workerAgentMD = `---
 name: rig-worker

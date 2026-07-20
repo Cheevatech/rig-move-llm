@@ -117,8 +117,11 @@ agent's output small, plus `.rig-move-llm/config.env`.
 - **Global (follows you):** registers the worker at **user scope** in `~/.claude.json` and installs
   global hooks + output style + a `SessionStart` hook — so **every** project offloads with no
   per-project setup. On first session in a project the `SessionStart` hook lazily creates a
-  `.rig-move-llm/` there carrying your settings (the API key stays inherited from the global config,
-  never copied), the way Serena creates `.serena/`.
+  `.rig-move-llm/` there — the way Serena creates `.serena/`. It **inherits** every setting from the
+  global config (nothing is copied), so a later change to `~/.rig-move-llm/config.env` (endpoint,
+  model, `ENABLED` on/off) propagates to all projects. Add a `KEY=value` line in a project's
+  `.rig-move-llm/config.env` only to override one setting there (e.g. `ENABLED=false` to turn the
+  hybrid off in that project alone).
 - **Project:** wires only this directory (a project-root `.mcp.json`, pre-approved by
   `enableAllProjectMcpServers` so headless `-p` never hangs on the trust prompt).
 

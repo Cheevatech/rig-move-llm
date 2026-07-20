@@ -99,11 +99,17 @@ func LoadFrom(projectDir string) Config {
 		workerBase = strings.TrimRight(backend.DefaultBase, "/")
 	}
 
-	// The scope that actually owns the local config file also owns the data dir;
-	// fall back to global when this project has no local config.
+	// A project owns its own data dir (stats/logs/gate state) whenever it has a
+	// .rig-move-llm/ directory — even when its config.env only inherits (all
+	// comments). Settings still layer local-over-global; this only decides WHERE
+	// per-project state is written. Keying on the directory (not on the file having
+	// values) is what lets a materialized project inherit every setting from global
+	// yet keep its own stats — and lets a global config change propagate here.
 	dataDir := GlobalDir()
-	if len(local) > 0 && projectDir != "" {
-		dataDir = filepath.Join(projectDir, DirName)
+	if projectDir != "" {
+		if d := filepath.Join(projectDir, DirName); dirExists(d) {
+			dataDir = d
+		}
 	}
 
 	logMaxMB := 50
@@ -168,6 +174,11 @@ func parseEnvFile(path string) map[string]string {
 		}
 	}
 	return out
+}
+
+func dirExists(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && fi.IsDir()
 }
 
 func truthy(v string) bool {

@@ -4,7 +4,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/Cheevatech/rig-move-llm/internal/config"
 )
@@ -39,13 +38,19 @@ func cmdSessionStart(r io.Reader, w io.Writer) int {
 		return 0 // no global scope -> not a global install -> stay out of the way
 	}
 
+	_ = globalData // presence already checked above; contents are intentionally not copied
+
 	dir := filepath.Join(projDir, config.DirName)
 	if os.MkdirAll(dir, 0o755) != nil {
 		return 0
 	}
-	// Carry the configured settings, but never copy the API key into every project
-	// tree — comment it so it inherits from ~/.rig-move-llm/config.env instead.
-	if os.WriteFile(localCfg, []byte(inheritKey(string(globalData))), 0o600) != nil {
+	// Inherit-not-copy (the Serena model): write a marker config that carries NO
+	// settings, so the project inherits endpoint/model/key/ENABLED from the global
+	// scope and a later change to ~/.rig-move-llm/config.env propagates here. The
+	// folder's presence alone gives the project its own stats/logs (see config
+	// dataDir resolution). Add a KEY here only to override the global value for this
+	// project (e.g. ENABLED=false to turn the hybrid off in this project only).
+	if os.WriteFile(localCfg, []byte(projectMarkerEnv), 0o600) != nil {
 		return 0
 	}
 	// Keep the per-project scope (config, logs, stats) out of version control.
@@ -53,14 +58,15 @@ func cmdSessionStart(r io.Reader, w io.Writer) int {
 	return 0
 }
 
-// inheritKey comments out the WORKER_API_KEY line so a materialized per-project
-// config falls back to the global key rather than duplicating the secret.
-func inheritKey(env string) string {
-	lines := strings.Split(env, "\n")
-	for i, ln := range lines {
-		if strings.HasPrefix(strings.TrimSpace(ln), "WORKER_API_KEY=") {
-			lines[i] = "# " + ln + "   (inherits ~/.rig-move-llm/config.env)"
-		}
-	}
-	return strings.Join(lines, "\n")
-}
+// projectMarkerEnv is the per-project config a global install materializes: no
+// settings, only guidance. Empty of values so everything inherits the global
+// scope and stays in sync with it; a user adds a KEY=value line here to override
+// one setting for this project.
+const projectMarkerEnv = `# rig-move-llm — this project inherits its settings from the global scope
+# (~/.rig-move-llm/config.env). Precedence: process env > this file > global.
+#
+# It is intentionally empty of settings, so changing the global config (endpoint,
+# model, ENABLED on/off) propagates here automatically. Add a line such as
+#   ENABLED=false
+# ONLY to override the global value for THIS project.
+`

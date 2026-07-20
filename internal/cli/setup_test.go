@@ -94,19 +94,42 @@ func TestSessionStartMaterializes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("per-project config not materialized: %v", err)
 	}
-	if !strings.Contains(string(data), "# WORKER_API_KEY=secret") {
-		t.Errorf("API key should be commented out for inheritance, got: %s", data)
+	// inherit-not-copy (the Serena model): the marker carries NO settings, so a
+	// global change propagates. It must not duplicate worker settings or the key.
+	if strings.Contains(string(data), "\nWORKER_API_BASE=") ||
+		strings.Contains(string(data), "\nENABLED=") ||
+		strings.Contains(string(data), "secret") {
+		t.Errorf("materialized config must inherit, not copy settings, got: %s", data)
 	}
-	if !strings.Contains(string(data), "WORKER_API_BASE=http://w:8000/v1") {
-		t.Errorf("settings should carry over, got: %s", data)
+	// everything resolves from the global scope...
+	cfg := config.LoadFrom(proj)
+	if cfg.WorkerAPIKey != "secret" {
+		t.Errorf("key should inherit global, got %q", cfg.WorkerAPIKey)
 	}
-	// the key resolves via inheritance from the global scope
-	if got := config.LoadFrom(proj).WorkerAPIKey; got != "secret" {
-		t.Errorf("per-project key should inherit global, got %q", got)
+	if cfg.WorkerAPIBase != "http://w:8000/v1" {
+		t.Errorf("base should inherit global, got %q", cfg.WorkerAPIBase)
+	}
+	if !cfg.Enabled {
+		t.Error("ENABLED should inherit global true")
+	}
+	// ...but the project owns its own data dir (stats/logs)
+	if want := filepath.Join(proj, config.DirName); cfg.DataDir != want {
+		t.Errorf("dataDir should be project-local %q, got %q", want, cfg.DataDir)
 	}
 	if _, err := os.Stat(filepath.Join(proj, config.DirName, ".gitignore")); err != nil {
 		t.Errorf(".gitignore not written: %v", err)
 	}
+
+	// The conflict fix: flipping the GLOBAL switch propagates to the materialized
+	// project (it inherits, it did not copy).
+	if err := os.WriteFile(filepath.Join(gdir, config.ConfigFile),
+		[]byte("WORKER_API_BASE=http://w:8000/v1\nWORKER_API_KEY=secret\nENABLED=false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if config.LoadFrom(proj).Enabled {
+		t.Error("global ENABLED=false must propagate to the materialized project (inherit, not copy)")
+	}
+
 	// idempotent: a second session must not clobber or error
 	if rc := cmdSessionStart(strings.NewReader("{}"), io.Discard); rc != 0 {
 		t.Errorf("second cmdSessionStart rc=%d", rc)

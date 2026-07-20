@@ -51,6 +51,13 @@ func LocalDir() string {
 	return filepath.Join(cwd, DirName)
 }
 
+// FileValues reads a single scope's config.env into a KEY=VALUE map (empty when the
+// file is absent). It lets the CLI (e.g. `rig-move-llm config`) show which layer set
+// a value, without duplicating the env-file parser.
+func FileValues(path string) map[string]string {
+	return parseEnvFile(path)
+}
+
 // Load resolves configuration as seen from the current working directory.
 func Load() Config {
 	cwd, _ := os.Getwd()

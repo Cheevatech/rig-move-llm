@@ -127,7 +127,11 @@ agent's output small, plus `.rig-move-llm/config.env`.
 
 **On / off switch.** `ENABLED` in `config.env` is the master toggle: `false` (the default when you
 skip the worker) means the hook passes every tool through and Claude Code behaves normally; set a
-worker endpoint and `ENABLED=true` to activate the offload — no re-install needed. `rig-move-llm run
+worker endpoint and `ENABLED=true` to activate the offload — no re-install needed. Flip it from the
+CLI without touching the hidden dir: `rig-move-llm enable` / `rig-move-llm disable` (add `--local` to
+scope the flip to this project only). `rig-move-llm config` prints the effective configuration — which
+scope wins, the resolved worker endpoint, and the on/off state — and `rig-move-llm config --open`
+opens the target scope's `config.env` in your `$EDITOR`. `rig-move-llm run
 -- claude` remains available when you also want the proxy's observability on the main leg. Reverse
 everything with `rig-move-llm uninstall` (restores your `settings.json` verbatim; strips the
 user-scope worker registration). `rig-move-llm init [--global] [--npx] [flags]` is the
@@ -151,6 +155,11 @@ Subcommands:
 
 ```
 rig-move-llm  (no args) | setup             guided setup wizard (scope + worker + wiring)
+                                             (arrow/space-select TUI on a terminal;
+                                              numbered line prompts when piped/headless)
+rig-move-llm enable  [--local]               turn offload ON  (flip ENABLED in config.env)
+rig-move-llm disable [--local]               turn offload OFF (Claude Code runs normally)
+rig-move-llm config  [--local] [--open]      show the effective config / open it in $EDITOR
 rig-move-llm serve [--port N] [--status]     run the routing proxy / report state
 rig-move-llm hook  pre-tool|post-tool|session-start  Claude Code hooks (force-delegate + gate + auto-materialize)
 rig-move-llm init  [--global] [--npx] [--service] [flags]  non-interactive bootstrap

@@ -33,19 +33,34 @@ import (
 var Version = "dev"
 
 const usage = `rig-move-llm — move the heavy lifting off your paid LLM
+  Plan/review on your paid LLM; offload the code work to your own local (or cheap)
+  model. Install once, run a plain 'claude'.
 
-Usage:
+Setup
   rig-move-llm                             interactive setup wizard (same as 'setup')
   rig-move-llm setup                       guided install: scope + worker + wiring
-  rig-move-llm serve [--port N] [--status]  run the routing proxy / report its state
-  rig-move-llm hook  pre-tool|post-tool|session-start  Claude Code hook (reads stdin)
-  rig-move-llm worker                      run the worker MCP server on stdio (offload tool)
   rig-move-llm init  [--global] [--npx] [--service] [flags]  non-interactive bootstrap
   rig-move-llm uninstall [--global] [--purge]  reverse init for a scope (incl. OS service)
-  rig-move-llm run   [--] <command...>     launch a command with the proxy wired in
-  rig-move-llm stats [--reset|--history]   token accounting / savings
-  rig-move-llm version
 
+Control
+  rig-move-llm enable  [--local]           turn offload ON  (flip ENABLED in config.env)
+  rig-move-llm disable [--local]           turn offload OFF (Claude Code runs normally)
+  rig-move-llm config  [--local] [--open]  show the effective config / open it in $EDITOR
+  rig-move-llm stats   [--reset|--history] token accounting / savings
+
+Run
+  rig-move-llm run    [--] <command...>    launch a command with the proxy wired in
+  rig-move-llm serve  [--port N] [--status]  run the routing proxy / report its state
+
+Internal (invoked by Claude Code / MCP; rarely run by hand)
+  rig-move-llm hook   pre-tool|post-tool|session-start  Claude Code hook (reads stdin)
+  rig-move-llm worker                      run the worker MCP server on stdio (offload tool)
+
+  rig-move-llm version
+  rig-move-llm help
+
+Scope: 'global' follows you across every project (~/.rig-move-llm); 'local' is this
+directory only (./.rig-move-llm). Precedence: process env > local > global.
 Run "rig-move-llm <command> -h" for command flags.`
 
 // Main is the entry point; it returns a process exit code.
@@ -84,6 +99,12 @@ func Main(args []string) int {
 		return cmdInit(rest)
 	case "uninstall":
 		return cmdUninstall(rest)
+	case "enable":
+		return cmdEnable(rest)
+	case "disable":
+		return cmdDisable(rest)
+	case "config":
+		return cmdConfig(rest)
 	case "run":
 		return cmdRun(rest)
 	case "stats":

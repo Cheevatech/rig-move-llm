@@ -18,7 +18,7 @@ func preDecision(t *testing.T, s *State, payloadJSON string) (denied bool, out s
 }
 
 func TestTeammateRigAgentIDAllowsWorkerTools(t *testing.T) {
-	s := &State{} // no log/gate paths needed
+	s := &State{Enabled: true} // no log/gate paths needed
 
 	// A terminal-backend teammate's Bash carries no agent_id in the payload; its
 	// identity lives in RIG_AGENT_ID (stamped by teammate-exec). It must be allowed.
@@ -34,7 +34,7 @@ func TestTeammateRigAgentIDAllowsWorkerTools(t *testing.T) {
 }
 
 func TestFloor1_LeadWithoutMarkerStillDenied(t *testing.T) {
-	s := &State{}
+	s := &State{Enabled: true}
 
 	// Floor #1: the lead (MAIN) process is launched without RIG_AGENT_ID and its
 	// payloads have no agent_id. It must remain plan/delegate/review-only — no
@@ -51,7 +51,7 @@ func TestFloor1_LeadWithoutMarkerStillDenied(t *testing.T) {
 }
 
 func TestInProcessTeammateAgentIDInPayloadAllowed(t *testing.T) {
-	s := &State{}
+	s := &State{Enabled: true}
 
 	// The default in-process backend: the teammate's agent_id is in the payload
 	// (no RIG_AGENT_ID env). Must be allowed — this is the zero-config path.

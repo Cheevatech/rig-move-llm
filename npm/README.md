@@ -6,14 +6,16 @@ knowledge lookup is delegated to a **worker model of your choice** — a local m
 (Ollama / llama.cpp / ExLlama) or any API endpoint (OpenRouter, …).
 
 ```sh
-npx rig-move-llm@latest init      # auto-detects a local worker; wires this project
+npm install -g rig-move-llm       # the hooks need the binary on PATH
+rig-move-llm                       # guided setup wizard: scope + worker + wiring
 claude                             # plain Claude Code — auto-delegates to the worker, no flags
 ```
 
-`init` wires Claude Code so a plain `claude` offloads code work to the worker with no
-flags or wrapper. `npx rig-move-llm run -- claude` also works when you want the proxy's
-per-project routing / observability on the main leg. Add `--global` to `init` to install
-for every project; reverse it with `npx rig-move-llm uninstall`.
+A bare `rig-move-llm` runs an interactive wizard: pick the scope (`global` = every project,
+follows you; or `project`), then set a worker endpoint — or press Enter to **skip** it, which
+installs rig inert so Claude Code runs normally until you turn it on (`ENABLED` in `config.env`).
+Global scope registers the worker at user scope and auto-creates a `.rig-move-llm/` in each project
+on first session, the way Serena creates `.serena/`. Reverse it with `rig-move-llm uninstall`.
 
 This npm package ships a single prebuilt static binary per platform (via
 `optionalDependencies`, the esbuild/biome pattern — no postinstall download).

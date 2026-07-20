@@ -35,10 +35,12 @@ var Version = "dev"
 const usage = `rig-move-llm — move the heavy lifting off your paid LLM
 
 Usage:
+  rig-move-llm                             interactive setup wizard (same as 'setup')
+  rig-move-llm setup                       guided install: scope + worker + wiring
   rig-move-llm serve [--port N] [--status]  run the routing proxy / report its state
-  rig-move-llm hook  pre-tool|post-tool    Claude Code hook (reads a payload on stdin)
+  rig-move-llm hook  pre-tool|post-tool|session-start  Claude Code hook (reads stdin)
   rig-move-llm worker                      run the worker MCP server on stdio (offload tool)
-  rig-move-llm init  [--global] [--service] [flags]  bootstrap config + Claude Code wiring
+  rig-move-llm init  [--global] [--npx] [--service] [flags]  non-interactive bootstrap
   rig-move-llm uninstall [--global] [--purge]  reverse init for a scope (incl. OS service)
   rig-move-llm run   [--] <command...>     launch a command with the proxy wired in
   rig-move-llm stats [--reset|--history]   token accounting / savings
@@ -49,6 +51,11 @@ Run "rig-move-llm <command> -h" for command flags.`
 // Main is the entry point; it returns a process exit code.
 func Main(args []string) int {
 	if len(args) == 0 {
+		// A bare invocation launches the setup wizard for an interactive user; a
+		// pipe/script (no TTY) gets the usage text instead of hanging on a prompt.
+		if stdinIsTerminal() {
+			return cmdSetup(nil)
+		}
 		fmt.Fprintln(os.Stderr, usage)
 		return 2
 	}
@@ -62,6 +69,8 @@ func Main(args []string) int {
 
 	cmd, rest := args[0], args[1:]
 	switch cmd {
+	case "setup":
+		return cmdSetup(rest)
 	case "teammate-exec":
 		// Explicit form (docs/tests): the remaining args are the claude flags.
 		return cmdTeammateExec(rest)
@@ -156,14 +165,18 @@ func cmdHook(args []string) int {
 		fmt.Fprintln(os.Stderr, "hook: expected 'pre-tool' or 'post-tool'")
 		return 2
 	}
-	st := buildHookState()
 	switch args[0] {
 	case "pre-tool":
-		_ = st.PreTool(os.Stdin, os.Stdout)
+		_ = buildHookState().PreTool(os.Stdin, os.Stdout)
 	case "post-tool":
-		_ = st.PostTool(os.Stdin, os.Stdout)
+		_ = buildHookState().PostTool(os.Stdin, os.Stdout)
+	case "session-start":
+		// SessionStart hook (global installs): lazily materialize a per-project
+		// .rig-move-llm/ carrying the configured settings, the way Serena creates
+		// .serena on first session. Context-only; never blocks the session.
+		return cmdSessionStart(os.Stdin, os.Stdout)
 	default:
-		fmt.Fprintf(os.Stderr, "hook: unknown phase %q (want pre-tool|post-tool)\n", args[0])
+		fmt.Fprintf(os.Stderr, "hook: unknown phase %q (want pre-tool|post-tool|session-start)\n", args[0])
 		return 2
 	}
 	return 0
@@ -188,9 +201,10 @@ func cmdWorker(args []string) int {
 // buildHookState resolves the hook's on-disk state from config + env. The state
 // dir defaults to the active scope's data dir; RIG_STATE_DIR overrides it.
 func buildHookState() *hook.State {
+	cfg := config.Load()
 	dir := os.Getenv("RIG_STATE_DIR")
 	if dir == "" {
-		dir = config.Load().DataDir
+		dir = cfg.DataDir
 	}
 	runner := os.Getenv("RIG_GATE_RUNNER")
 	if runner == "" {
@@ -199,6 +213,7 @@ func buildHookState() *hook.State {
 		}
 	}
 	return &hook.State{
+		Enabled:    cfg.Enabled,
 		LogPath:    filepath.Join(dir, "force-delegate.log"),
 		GatePaths:  filepath.Join(dir, "gate_paths"),
 		GateRunner: runner,

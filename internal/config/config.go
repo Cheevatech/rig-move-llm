@@ -27,9 +27,10 @@ type Config struct {
 	WorkerAPIKey    string
 	WorkerModel     string // model name the worker MCP tool sends to the worker endpoint
 	Backend         Backend
-	LogBodies           bool   // opt-in full request/response logging (default: metadata only)
-	LogMaxMB            int    // size cap for logs/requests.jsonl before compaction (default 50)
-	DataDir             string // scope dir where logs/stats are written (resolved local|global)
+	Enabled         bool   // master on/off: when false the hook passes every tool through (Claude Code behaves normally, no offload/force-delegate). Defaults to true when a worker endpoint is set, false when it is skipped; an explicit ENABLED overrides.
+	LogBodies       bool   // opt-in full request/response logging (default: metadata only)
+	LogMaxMB        int    // size cap for logs/requests.jsonl before compaction (default 50)
+	DataDir         string // scope dir where logs/stats are written (resolved local|global)
 }
 
 // GlobalDir returns ~/.rig-move-llm.
@@ -69,16 +70,22 @@ func LoadFrom(projectDir string) Config {
 		local = parseEnvFile(filepath.Join(projectDir, DirName, ConfigFile))
 	}
 
-	// get reads a key with precedence env > local file > global file.
-	get := func(key string) string {
+	// getOK reads a key with precedence env > local file > global file, reporting
+	// whether it was set in any layer (so an absent key can default differently
+	// from an explicitly-empty one).
+	getOK := func(key string) (string, bool) {
 		if v, ok := os.LookupEnv(key); ok {
-			return v
+			return v, true
 		}
 		if v, ok := local[key]; ok {
-			return v
+			return v, true
 		}
-		return global[key]
+		if v, ok := global[key]; ok {
+			return v, true
+		}
+		return "", false
 	}
+	get := func(key string) string { v, _ := getOK(key); return v }
 
 	port := get("PORT")
 	if port == "" {
@@ -104,6 +111,15 @@ func LoadFrom(projectDir string) Config {
 		logMaxMB = n
 	}
 
+	// Master switch. Absent -> enabled only when a worker endpoint is configured
+	// (skipping the worker in setup leaves it off, so Claude Code runs normally);
+	// an explicit ENABLED wins either way, so a user can pre-wire everything and
+	// flip it on later without re-running init.
+	enabled := workerBase != ""
+	if v, ok := getOK("ENABLED"); ok {
+		enabled = truthy(v)
+	}
+
 	return Config{
 		Port:            port,
 		MainUpstreamURL: strings.TrimRight(get("MAIN_UPSTREAM_URL"), "/"),
@@ -111,6 +127,7 @@ func LoadFrom(projectDir string) Config {
 		WorkerAPIKey:    get("WORKER_API_KEY"),
 		WorkerModel:     get("WORKER_MODEL"),
 		Backend:         backend,
+		Enabled:         enabled,
 		LogBodies:       truthy(get("LOG_BODIES")),
 		LogMaxMB:        logMaxMB,
 		DataDir:         dataDir,

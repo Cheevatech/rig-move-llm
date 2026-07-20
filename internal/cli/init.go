@@ -12,10 +12,30 @@ import (
 	"github.com/Cheevatech/rig-move-llm/internal/service"
 )
 
+// initOpts is the resolved bootstrap request. Both cmdInit (flag-driven) and the
+// interactive wizard (cmdSetup) build one and hand it to applyInit, so the wiring
+// lives in exactly one place.
+type initOpts struct {
+	global       bool
+	backend      string
+	workerBase   string
+	workerModel  string
+	workerKey    string
+	mainUpstream string
+	port         string
+	knowledgeURL string
+	searchURL    string
+	enabled      bool // ENABLED written to config; false = wired but inert (Claude Code runs normally)
+	npxWorker    bool // spawn the worker MCP as `npx -y rig-move-llm worker` (zero global install)
+	service      bool
+	force        bool
+	noDetect     bool
+}
+
 // cmdInit bootstraps a scope: it writes the config file and wires Claude Code
-// (hooks + permissions + worker subagent + MCP toolbelt) so that `rig-move-llm
-// run -- claude` launches a working hybrid. Local (default) touches only this
-// project; --global touches ~/.claude and applies to every project.
+// (hooks + permissions + worker MCP + output style) so that a plain `claude`
+// launches a working hybrid. Local (default) touches only this project; --global
+// touches ~/.claude and applies to every project (the "follows you" mode).
 func cmdInit(args []string) int {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
 	global := fs.Bool("global", false, "install for all projects (~/.claude + ~/.rig-move-llm)")
@@ -27,6 +47,7 @@ func cmdInit(args []string) int {
 	port := fs.String("port", "4000", "proxy listen port")
 	knowledgeURL := fs.String("knowledge-url", "", "optional knowledge MCP SSE URL")
 	searchURL := fs.String("search-url", "", "optional search MCP SSE URL")
+	npx := fs.Bool("npx", false, "spawn the worker via `npx -y rig-move-llm worker` (no global binary needed)")
 	force := fs.Bool("force", false, "overwrite an existing config file")
 	noDetect := fs.Bool("no-detect", false, "skip probing for a local worker endpoint")
 	svc := fs.Bool("service", false, "install an OS service so the proxy survives reboots (requires --global)")
@@ -51,9 +72,21 @@ func cmdInit(args []string) int {
 		}
 	}
 
+	return applyInit(initOpts{
+		global: *global, backend: *backend, workerBase: *workerBase,
+		workerModel: *workerModel, workerKey: *workerKey, mainUpstream: *mainUpstream,
+		port: *port, knowledgeURL: *knowledgeURL, searchURL: *searchURL,
+		// A worker endpoint was configured -> enable; otherwise stay inert.
+		enabled:   *workerBase != "" || *backend != "",
+		npxWorker: *npx, service: *svc, force: *force, noDetect: *noDetect,
+	})
+}
+
+// applyInit performs the actual bootstrap for a resolved initOpts.
+func applyInit(o initOpts) int {
 	dataDir := config.LocalDir()
 	claudeDir := filepath.Join(".", ".claude")
-	if *global {
+	if o.global {
 		dataDir = config.GlobalDir()
 		home, _ := os.UserHomeDir()
 		claudeDir = filepath.Join(home, ".claude")
@@ -67,13 +100,13 @@ func cmdInit(args []string) int {
 	// 1. config.env
 	cfgPath := filepath.Join(dataDir, config.ConfigFile)
 	preExisting := fileExists(cfgPath)
-	if preExisting && !*force {
+	if preExisting && !o.force {
 		fmt.Printf("config exists: %s (use --force to overwrite)\n", cfgPath)
 	} else {
 		if err := os.WriteFile(cfgPath, []byte(renderConfigEnv(configEnvVals{
-			backend: *backend, workerBase: *workerBase, workerModel: *workerModel,
-			workerKey: *workerKey, mainUpstream: *mainUpstream, port: *port,
-			knowledgeURL: *knowledgeURL, searchURL: *searchURL,
+			backend: o.backend, workerBase: o.workerBase, workerModel: o.workerModel,
+			workerKey: o.workerKey, mainUpstream: o.mainUpstream, port: o.port,
+			knowledgeURL: o.knowledgeURL, searchURL: o.searchURL, enabled: o.enabled,
 		})), 0o600); err != nil {
 			fmt.Fprintln(os.Stderr, "init: write config:", err)
 			return 1
@@ -83,7 +116,7 @@ func cmdInit(args []string) int {
 
 	// 1b. Register the project in the global daemon's fail-closed allowlist. A
 	// cloned repo shipping its own config.env has no effect until this opt-in.
-	if !*global {
+	if !o.global {
 		canon, err := config.CanonicalPath(".")
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "init: cannot canonicalize project dir:", err)
@@ -99,7 +132,7 @@ func cmdInit(args []string) int {
 		fmt.Println("registered", canon, "in", config.ProjectsPath())
 	}
 
-	// 2. Claude Code wiring (hooks + permissions).
+	// 2. Claude Code wiring (hooks + permissions + session-start auto-materialize).
 	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
 		fmt.Fprintln(os.Stderr, "init:", err)
 		return 1
@@ -112,36 +145,37 @@ func cmdInit(args []string) int {
 
 	// 3. MCP config for `run --mcp-config` back-compat: the same worker (+optional
 	// toolbelt) served as a one-off file. Bare `claude` ignores this; it reads the
-	// project-root .mcp.json written in 4b. Kept so `run` still works when a user
-	// wants the proxy/observability leg alongside the offload.
+	// project-root .mcp.json (local) or the user-scope ~/.claude.json (global).
 	mcpPath := filepath.Join(dataDir, "mcp.json")
-	if err := os.WriteFile(mcpPath, []byte(renderMCP(*knowledgeURL, *searchURL)), 0o644); err != nil {
+	if err := os.WriteFile(mcpPath, []byte(renderMCP(o.knowledgeURL, o.searchURL, o.npxWorker)), 0o644); err != nil {
 		fmt.Fprintln(os.Stderr, "init: mcp:", err)
 		return 1
 	}
 	fmt.Println("wrote MCP config (worker + toolbelt)", mcpPath)
 
-	// 4. Auto-wire so a PLAIN `claude` (no flags, no `run` wrapper) offloads to the
-	// worker. CC auto-discovers a project-root .mcp.json and loads .claude/CLAUDE.md;
-	// the trust prompt for the .mcp.json server is pre-approved by
-	// enableAllProjectMcpServers in settings.json (set in wireSettings) so headless
-	// `-p` does not hang. See memory cc-persistent-autowire-recipe. Project-scoped:
-	// global installs use `run --mcp-config` or a user-scope .mcp.json instead.
-	if !*global {
+	// 4. Auto-wire so a PLAIN `claude` offloads to the worker with no flags.
+	//   - local: a project-root .mcp.json CC auto-discovers, pre-approved by
+	//     enableAllProjectMcpServers (set in wireSettings) so headless -p never hangs.
+	//   - global: register the worker at USER scope in ~/.claude.json (top-level
+	//     mcpServers) — loads in EVERY project automatically, no per-project trust
+	//     prompt, exactly how Serena follows the user across projects.
+	if o.global {
+		if err := registerUserMCP(o.npxWorker); err != nil {
+			fmt.Fprintln(os.Stderr, "init: user-scope MCP:", err)
+			return 1
+		}
+		fmt.Println("registered worker at user scope in", userClaudeJSON())
+	} else {
 		rootMCP := filepath.Join(".", ".mcp.json")
-		if err := os.WriteFile(rootMCP, []byte(renderMCP(*knowledgeURL, *searchURL)), 0o644); err != nil {
+		if err := os.WriteFile(rootMCP, []byte(renderMCP(o.knowledgeURL, o.searchURL, o.npxWorker)), 0o644); err != nil {
 			fmt.Fprintln(os.Stderr, "init: root mcp:", err)
 			return 1
 		}
 		fmt.Println("wrote auto-discovered MCP config", rootMCP)
 	}
 
-	// 4d. Output style = the persistent, SYSTEM-PROMPT-tier terse-delegate workflow.
-	// This is the no-flag equivalent of P9's `--append-system-prompt`: bare `claude`
-	// loads it at session start (confirmed via claude-code-guide, CC 2.1.x). It is
-	// what recovers the token savings — the .claude/CLAUDE.md steer (context tier)
-	// secured delegation but not MAIN verbosity; the output style constrains both.
-	// wireSettings sets "outputStyle" to activate it.
+	// 4d. Output style = the persistent, SYSTEM-PROMPT-tier terse-delegate workflow
+	// (no-flag equivalent of P9's --append-system-prompt). wireSettings activates it.
 	stylePath := filepath.Join(claudeDir, "output-styles", "rig-delegate.md")
 	if err := os.MkdirAll(filepath.Dir(stylePath), 0o755); err != nil {
 		fmt.Fprintln(os.Stderr, "init: output-styles dir:", err)
@@ -153,10 +187,8 @@ func cmdInit(args []string) int {
 	}
 	fmt.Println("wrote terse-delegate output style", stylePath)
 
-	// 4c. Delegate-only steer. Guidance, not enforcement (the force-delegate
-	// PreToolUse hook is the hard constraint) — it just makes MAIN delegate on the
-	// first try, avoiding the deny round-trip. Never clobber a user's CLAUDE.md:
-	// write only when absent (or already ours).
+	// 4c. Delegate-only steer (guidance, not enforcement). Never clobber a user's
+	// CLAUDE.md: write only when absent (or already ours).
 	memPath := filepath.Join(claudeDir, "CLAUDE.md")
 	if existing, err := os.ReadFile(memPath); err != nil {
 		if err := os.WriteFile(memPath, []byte(delegateSteerMD), 0o644); err != nil {
@@ -171,7 +203,7 @@ func cmdInit(args []string) int {
 	}
 
 	// 5. OS service (optional): supervise `serve` across reboots.
-	if *svc {
+	if o.service {
 		self, err := os.Executable()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "init: service:", err)
@@ -187,16 +219,21 @@ func cmdInit(args []string) int {
 	}
 
 	scope := "local (this project)"
-	if *global {
-		scope = "global (all projects)"
+	if o.global {
+		scope = "global (all projects — follows you)"
 	}
-	fmt.Printf("\ninit complete — scope: %s\nlaunch with:  rig-move-llm run -- claude\n", scope)
+	state := "ENABLED (offload active)"
+	if !o.enabled {
+		state = "DISABLED (Claude Code runs normally; set a worker endpoint + ENABLED=true in config.env to turn it on)"
+	}
+	fmt.Printf("\ninit complete — scope: %s\nstatus: %s\nlaunch with:  claude\n", scope, state)
 	return 0
 }
 
 type configEnvVals struct {
 	backend, workerBase, workerModel, workerKey, mainUpstream, port string
 	knowledgeURL, searchURL                                         string
+	enabled                                                         bool
 }
 
 func renderConfigEnv(v configEnvVals) string {
@@ -218,6 +255,13 @@ func renderConfigEnv(v configEnvVals) string {
 	kv("worker model name", "WORKER_MODEL", v.workerModel)
 	kv("worker API key (optional for local models; use an OpenRouter key for OpenRouter)", "WORKER_API_KEY", v.workerKey)
 	b.WriteString("\n")
+	// Master on/off. Written explicitly so the state is unambiguous: false = wired
+	// but inert (Claude Code runs normally), flip to true after setting an endpoint.
+	enabled := "false"
+	if v.enabled {
+		enabled = "true"
+	}
+	kv("master switch: true = offload active; false = Claude Code runs normally (no force-delegate). Skipping the worker in setup leaves this false.", "ENABLED", enabled)
 	kv("paid main-leg upstream (raw passthrough, OAuth untouched)", "MAIN_UPSTREAM_URL", v.mainUpstream)
 	kv("proxy listen port", "PORT", v.port)
 	b.WriteString("\n")
@@ -227,17 +271,24 @@ func renderConfigEnv(v configEnvVals) string {
 	return b.String()
 }
 
-func renderMCP(knowledgeURL, searchURL string) string {
+// workerMCPEntry is the worker server definition for an mcp config. When npx is
+// true it is spawned via `npx -y rig-move-llm worker` (zero global install — npx
+// resolves the published package each spawn); otherwise via the `rig-move-llm`
+// binary on PATH (a global npm/binary install).
+func workerMCPEntry(npx bool) map[string]any {
+	if npx {
+		return map[string]any{"type": "stdio", "command": "npx", "args": []string{"-y", "rig-move-llm", "worker"}}
+	}
+	return map[string]any{"type": "stdio", "command": "rig-move-llm", "args": []string{"worker"}}
+}
+
+func renderMCP(knowledgeURL, searchURL string, npx bool) string {
 	servers := map[string]any{
-		// The worker MCP server is the Option-2 offload mechanism: CC spawns
-		// `rig-move-llm worker` on stdio and calls its `implement` tool, whose
-		// agentic loop runs on the configured worker endpoint (guaranteed egress,
-		// independent of CC's in-process agent runtime — see ticket P9).
-		"worker": map[string]any{
-			"type":    "stdio",
-			"command": "rig-move-llm",
-			"args":    []string{"worker"},
-		},
+		// The worker MCP server is the Option-2 offload mechanism: CC spawns it on
+		// stdio and calls its `implement` tool, whose agentic loop runs on the
+		// configured worker endpoint (guaranteed egress, independent of CC's
+		// in-process agent runtime — see ticket P9).
+		"worker": workerMCPEntry(npx),
 	}
 	if knowledgeURL != "" {
 		servers["knowledge"] = map[string]string{"type": "sse", "url": knowledgeURL}
@@ -247,6 +298,59 @@ func renderMCP(knowledgeURL, searchURL string) string {
 	}
 	out, _ := json.MarshalIndent(map[string]any{"mcpServers": servers}, "", "  ")
 	return string(out) + "\n"
+}
+
+// userClaudeJSON returns ~/.claude.json, the user-scope config where a top-level
+// `mcpServers` entry loads in every project (how Serena registers globally).
+func userClaudeJSON() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".claude.json")
+}
+
+// registerUserMCP merges the worker server into the top-level `mcpServers` of
+// ~/.claude.json, preserving every other key and server. This is the global
+// "follows you" registration: user-scope MCP servers load in all projects with
+// no per-project .mcp.json and no trust prompt.
+func registerUserMCP(npx bool) error {
+	path := userClaudeJSON()
+	root := map[string]any{}
+	if data, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(data, &root)
+	}
+	servers, _ := root["mcpServers"].(map[string]any)
+	if servers == nil {
+		servers = map[string]any{}
+	}
+	servers["worker"] = workerMCPEntry(npx)
+	root["mcpServers"] = servers
+	out, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(out, '\n'), 0o644)
+}
+
+// unregisterUserMCP removes the worker server from ~/.claude.json's top-level
+// mcpServers (uninstall of a global scope), leaving everything else intact.
+func unregisterUserMCP() {
+	path := userClaudeJSON()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	root := map[string]any{}
+	if json.Unmarshal(data, &root) != nil {
+		return
+	}
+	if servers, ok := root["mcpServers"].(map[string]any); ok {
+		delete(servers, "worker")
+		if len(servers) == 0 {
+			delete(root, "mcpServers")
+		}
+	}
+	if out, err := json.MarshalIndent(root, "", "  "); err == nil {
+		_ = os.WriteFile(path, append(out, '\n'), 0o644)
+	}
 }
 
 func modelNote(model string) string {
@@ -288,6 +392,13 @@ func wireSettings(path, backupPath string) error {
 			// Task/Agent returns.
 			"matcher": "Task|Agent|mcp__worker__implement",
 			"hooks":   []any{map[string]any{"type": "command", "command": "rig-move-llm hook post-tool", "timeout": 600}},
+		}},
+		// SessionStart: lazily materialize a per-project .rig-move-llm/ carrying the
+		// configured settings, the way Serena creates .serena on first session. Runs
+		// on a new session or a resume; context-only, never blocks.
+		"SessionStart": []any{map[string]any{
+			"matcher": "startup|resume",
+			"hooks":   []any{map[string]any{"type": "command", "command": "rig-move-llm hook session-start"}},
 		}},
 	}
 

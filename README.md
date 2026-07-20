@@ -90,26 +90,45 @@ MAIN_UPSTREAM_URL=https://api.anthropic.com
 PORT=4000
 ```
 
-Install **local** (this project only) or **global** (all projects) via the `init` bootstrap.
+The setup wizard collects these for you — this is what it writes to `config.env`. Scope is
+**global** (all projects, follows you) or **project** (this dir only); `ENABLED` gates the whole
+thing on/off.
 
 ## Install & use
 
 ```sh
-npx rig-move-llm@latest init      # auto-detects a local Ollama/llama.cpp; wires this project
+npm install -g rig-move-llm        # the hooks need the binary on PATH
+rig-move-llm                        # guided setup wizard: scope + worker + wiring
 claude                             # plain Claude Code — auto-delegates to the worker, no flags
 ```
 
-`init` auto-wires Claude Code so a **plain `claude`** (no flags, no wrapper) offloads to the
-worker: it writes a project-root `.mcp.json` (the `mcp__worker__implement` tool, auto-discovered),
-pre-approves it in `.claude/settings.json` (`enableAllProjectMcpServers`, so headless `-p` does not
-hang on the trust prompt), installs the force-delegate + gate hooks, and drops a terse
+A bare `rig-move-llm` (or `rig-move-llm setup`) runs an **interactive wizard**: it asks the
+**scope** (`global` = every project, follows you; or `project` = this dir), then the **worker
+endpoint** — which you can **skip** by pressing Enter (rig installs but stays *off*, so Claude Code
+runs exactly as normal; turn it on later). It auto-detects a local Ollama/llama.cpp and offers it as
+the default. No config file to hand-edit.
+
+The wizard wires Claude Code so a **plain `claude`** (no flags, no wrapper) offloads to the worker:
+the `mcp__worker__implement` tool, the force-delegate + gate hooks, and a terse
 plan→delegate→review output style (`.claude/output-styles/rig-delegate.md`) that keeps the paid
-agent's output small. It also writes `.rig-move-llm/config.env`, probing `localhost:11434` (Ollama)
-and `:8080` (llama.cpp) so config is near-zero. Add `--global` for every project (`~/.claude` +
-`~/.rig-move-llm`); local overrides global. `rig-move-llm run -- claude` remains available when you
-also want the proxy's per-project routing / observability on the main leg (it sets
-`ANTHROPIC_BASE_URL` for that process only, so local scope never leaks). Reverse everything with
-`rig-move-llm uninstall` (restores your `settings.json` verbatim).
+agent's output small, plus `.rig-move-llm/config.env`.
+
+- **Global (follows you):** registers the worker at **user scope** in `~/.claude.json` and installs
+  global hooks + output style + a `SessionStart` hook — so **every** project offloads with no
+  per-project setup. On first session in a project the `SessionStart` hook lazily creates a
+  `.rig-move-llm/` there carrying your settings (the API key stays inherited from the global config,
+  never copied), the way Serena creates `.serena/`.
+- **Project:** wires only this directory (a project-root `.mcp.json`, pre-approved by
+  `enableAllProjectMcpServers` so headless `-p` never hangs on the trust prompt).
+
+**On / off switch.** `ENABLED` in `config.env` is the master toggle: `false` (the default when you
+skip the worker) means the hook passes every tool through and Claude Code behaves normally; set a
+worker endpoint and `ENABLED=true` to activate the offload — no re-install needed. `rig-move-llm run
+-- claude` remains available when you also want the proxy's observability on the main leg. Reverse
+everything with `rig-move-llm uninstall` (restores your `settings.json` verbatim; strips the
+user-scope worker registration). `rig-move-llm init [--global] [--npx] [flags]` is the
+non-interactive form for scripts (`--npx` spawns the worker via `npx -y rig-move-llm worker`, no
+global binary needed for that leg).
 
 The npm package ships a single prebuilt static binary per platform via
 `optionalDependencies` (the esbuild/biome pattern — no postinstall download).
@@ -127,9 +146,10 @@ unattended runs in an environment you'd let a CI job loose in.
 Subcommands:
 
 ```
+rig-move-llm  (no args) | setup             guided setup wizard (scope + worker + wiring)
 rig-move-llm serve [--port N] [--status]     run the routing proxy / report state
-rig-move-llm hook  pre-tool|post-tool        Claude Code hook (force-delegate + gate)
-rig-move-llm init  [--global] [--service] [flags]  bootstrap config + Claude Code wiring
+rig-move-llm hook  pre-tool|post-tool|session-start  Claude Code hooks (force-delegate + gate + auto-materialize)
+rig-move-llm init  [--global] [--npx] [--service] [flags]  non-interactive bootstrap
                                              (--service: OS-supervised, survives reboots)
 rig-move-llm uninstall [--global] [--purge]  reverse init for a scope (incl. OS service)
 rig-move-llm run   [--] <command...>         launch a command with the proxy wired in

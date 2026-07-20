@@ -42,6 +42,9 @@ func cmdUninstall(args []string) int {
 		if msg, err := service.New(self, home, dataDir).Uninstall(); err == nil {
 			fmt.Println(msg)
 		}
+
+		// Reverse the user-scope MCP registration (global "follows you" wiring).
+		unregisterUserMCP()
 	}
 
 	settingsPath := filepath.Join(claudeDir, "settings.json")
@@ -103,7 +106,7 @@ func stripRigHooks(path string) error {
 		}
 		return os.WriteFile(path, append(out, '\n'), 0o644)
 	}
-	for _, phase := range []string{"PreToolUse", "PostToolUse"} {
+	for _, phase := range []string{"PreToolUse", "PostToolUse", "SessionStart"} {
 		entries, ok := hooks[phase].([]any)
 		if !ok {
 			continue

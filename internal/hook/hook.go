@@ -42,6 +42,11 @@ type payload struct {
 // State locates the hook's on-disk state (log + gate-path ledger) and the
 // external gate runner. Paths are resolved by the caller from config/env.
 type State struct {
+	// Enabled is the master switch. When false the hook passes every tool through
+	// (no force-delegate, no gate) so Claude Code behaves exactly as it would
+	// without rig — the mode you get by skipping the worker in setup. The global
+	// hook is always wired; this gates its behaviour at runtime from config.
+	Enabled    bool
 	LogPath    string // append-only decision trail
 	GatePaths  string // ledger of authored .gate dirs (one per line)
 	GateRunner string // external command: `<runner> <repo>` -> "VERDICT|detail"
@@ -81,6 +86,13 @@ const denyReason = "Main agent is plan/delegate/review only. Delegate this to th
 // returns nil error (a silent allow is an empty stdout + exit 0 by the caller).
 func (s *State) PreTool(r io.Reader, w io.Writer) error {
 	p := decode(r)
+
+	// Master switch off: pass everything through. Claude Code runs normally — no
+	// force-delegate, no worker required. This is the "worker skipped" mode.
+	if !s.Enabled {
+		return nil
+	}
+
 	agentID := effectiveAgentID(p)
 	s.logf("agent_id=%s tool=%s", orMain(agentID), or(p.ToolName, "?"))
 
@@ -132,6 +144,9 @@ func (s *State) PreTool(r io.Reader, w io.Writer) error {
 // return it runs the external gate runner against every frozen contract and, if
 // found, writes an additionalContext block steering MAIN's next move.
 func (s *State) PostTool(r io.Reader, w io.Writer) error {
+	if !s.Enabled {
+		return nil
+	}
 	p := decode(r)
 
 	// Only MAIN's delegate returns are gate points: the worker MCP tool (Option 2)

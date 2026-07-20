@@ -10,7 +10,7 @@ import (
 // TestMain_TaskDeniedSteersToWorker asserts the Option-2 pivot: MAIN can no
 // longer spawn a subagent — it must call the worker MCP tool instead.
 func TestMain_TaskDeniedSteersToWorker(t *testing.T) {
-	s := &State{}
+	s := &State{Enabled: true}
 	// Even a well-formed synchronous Task (previously allowed) is now denied for MAIN.
 	task := `{"tool_name":"Task","tool_input":{"run_in_background":false}}`
 	denied, out := preDecision(t, s, task)
@@ -34,7 +34,7 @@ func TestMain_WorkerToolAllowed_FreezesGate(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(gate, "repro.py"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	s := &State{GatePaths: filepath.Join(dir, "gate_paths"), LogPath: filepath.Join(dir, "log")}
+	s := &State{Enabled: true, GatePaths: filepath.Join(dir, "gate_paths"), LogPath: filepath.Join(dir, "log")}
 	s.appendGatePath(gate)
 
 	call := `{"tool_name":"mcp__worker__implement","tool_input":{}}`
@@ -49,7 +49,7 @@ func TestMain_WorkerToolAllowed_FreezesGate(t *testing.T) {
 // TestMain_OtherMCPStillDenied confirms only the worker server is opened up;
 // arbitrary MCP servers remain denied for MAIN (the shared-MCP tier is unchanged).
 func TestMain_OtherMCPStillDenied(t *testing.T) {
-	s := &State{}
+	s := &State{Enabled: true}
 	if denied, _ := preDecision(t, s, `{"tool_name":"mcp__random__do"}`); !denied {
 		t.Error("a non-allowlisted MCP tool should stay denied for MAIN")
 	}
@@ -69,6 +69,7 @@ func TestPostTool_GatesOnWorkerReturn(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := &State{
+		Enabled:    true,
 		GatePaths:  filepath.Join(dir, "gate_paths"),
 		LogPath:    filepath.Join(dir, "log"),
 		GateRunner: runner,

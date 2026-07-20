@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/Cheevatech/rig-move-llm/internal/config"
@@ -65,23 +66,45 @@ func cmdSetup(args []string) int {
 	o.enabled = o.workerBase != ""
 	fmt.Println()
 
-	// 3. Wire it.
-	rc := applyInit(o)
-	if rc != 0 {
-		return rc
+	// 3. Make the binary permanent. The hooks invoke `rig-move-llm ...`, so it must
+	//    stay on PATH — but `npx rig-move-llm` runs transiently. Install it globally
+	//    now (that is what makes this a single command). Skipped when it is already
+	//    a real global install (not the npx cache).
+	if !globallyInstalled() {
+		fmt.Println("The hooks call `rig-move-llm`, so it needs to stay on your PATH.")
+		if yes(ask("install it globally now (npm install -g rig-move-llm)? (y/n)", "y")) {
+			c := exec.Command("npm", "install", "-g", "rig-move-llm")
+			c.Stdout, c.Stderr = os.Stdout, os.Stderr
+			if err := c.Run(); err != nil {
+				fmt.Println("  npm install failed — run `npm install -g rig-move-llm` yourself, then re-run setup.")
+			} else {
+				fmt.Println("  installed rig-move-llm globally.")
+			}
+		} else {
+			fmt.Println("  skipped — run `npm install -g rig-move-llm` before launching claude.")
+		}
+		fmt.Println()
 	}
 
-	// 4. The hooks/worker are invoked as `rig-move-llm ...`, so the binary must be
-	//    on PATH. If setup ran via `npx` (transient), tell the user how to make it
-	//    permanent — the one thing the wizard cannot do for them.
-	if _, err := exec.LookPath("rig-move-llm"); err != nil {
-		fmt.Println()
-		fmt.Println("NOTE: `rig-move-llm` is not on your PATH yet — the hooks need it. Install it once:")
-		fmt.Println("      npm install -g rig-move-llm")
+	// 4. Wire Claude Code.
+	if rc := applyInit(o); rc != 0 {
+		return rc
 	}
 	fmt.Println()
 	fmt.Println("Done. Just run:  claude")
 	return 0
+}
+
+// globallyInstalled reports whether rig-move-llm lives in the npm global bin dir
+// (a real `npm i -g`), as opposed to the transient `npx` cache. It lets a
+// `npx rig-move-llm` run offer to make itself permanent without nagging a user
+// who already installed it globally.
+func globallyInstalled() bool {
+	out, err := exec.Command("npm", "prefix", "-g").Output()
+	if err != nil {
+		return false
+	}
+	return fileExists(filepath.Join(strings.TrimSpace(string(out)), "bin", "rig-move-llm"))
 }
 
 func yes(s string) bool {

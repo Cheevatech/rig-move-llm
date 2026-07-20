@@ -97,16 +97,17 @@ thing on/off.
 ## Install & use
 
 ```sh
-npm install -g rig-move-llm        # the hooks need the binary on PATH
-rig-move-llm                        # guided setup wizard: scope + worker + wiring
+npx rig-move-llm                   # one command → the setup wizard (installs itself on confirm)
 claude                             # plain Claude Code — auto-delegates to the worker, no flags
 ```
 
-A bare `rig-move-llm` (or `rig-move-llm setup`) runs an **interactive wizard**: it asks the
-**scope** (`global` = every project, follows you; or `project` = this dir), then the **worker
-endpoint** — which you can **skip** by pressing Enter (rig installs but stays *off*, so Claude Code
-runs exactly as normal; turn it on later). It auto-detects a local Ollama/llama.cpp and offers it as
-the default. No config file to hand-edit.
+`npx rig-move-llm` (or `rig-move-llm setup` if already installed) runs an **interactive wizard**: it
+asks the **scope** (`global` = every project, follows you; or `project` = this dir), then the
+**worker endpoint** — which you can **skip** by pressing Enter (rig installs but stays *off*, so
+Claude Code runs exactly as normal; turn it on later). It auto-detects a local Ollama/llama.cpp and
+offers it as the default. No config file to hand-edit. Because the hooks call `rig-move-llm`, the
+wizard offers to `npm install -g` itself so it stays on your PATH — so the single `npx` command sets
+up everything.
 
 The wizard wires Claude Code so a **plain `claude`** (no flags, no wrapper) offloads to the worker:
 the `mcp__worker__implement` tool, the force-delegate + gate hooks, and a terse

@@ -56,7 +56,6 @@ func cmdUninstall(args []string) int {
 		fmt.Println("removed rig-move-llm hooks from", settingsPath)
 	}
 
-	remove(filepath.Join(claudeDir, "agents", "rig-worker.md"))
 	remove(filepath.Join(dataDir, "mcp.json"))
 
 	// Reverse the auto-wire files (P10-A). Project-root .mcp.json is written only for

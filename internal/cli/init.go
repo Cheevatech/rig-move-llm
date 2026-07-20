@@ -100,7 +100,7 @@ func cmdInit(args []string) int {
 	}
 
 	// 2. Claude Code wiring (hooks + permissions).
-	if err := os.MkdirAll(filepath.Join(claudeDir, "agents"), 0o755); err != nil {
+	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
 		fmt.Fprintln(os.Stderr, "init:", err)
 		return 1
 	}
@@ -110,15 +110,7 @@ func cmdInit(args []string) int {
 	}
 	fmt.Println("wired hooks + permissions in", filepath.Join(claudeDir, "settings.json"))
 
-	// 3. Worker subagent.
-	agentPath := filepath.Join(claudeDir, "agents", "rig-worker.md")
-	if err := os.WriteFile(agentPath, []byte(workerAgentMD), 0o644); err != nil {
-		fmt.Fprintln(os.Stderr, "init: agent:", err)
-		return 1
-	}
-	fmt.Println("wrote worker subagent", agentPath)
-
-	// 4. MCP config for `run --mcp-config` back-compat: the same worker (+optional
+	// 3. MCP config for `run --mcp-config` back-compat: the same worker (+optional
 	// toolbelt) served as a one-off file. Bare `claude` ignores this; it reads the
 	// project-root .mcp.json written in 4b. Kept so `run` still works when a user
 	// wants the proxy/observability leg alongside the offload.
@@ -129,7 +121,7 @@ func cmdInit(args []string) int {
 	}
 	fmt.Println("wrote MCP config (worker + toolbelt)", mcpPath)
 
-	// 4b. Auto-wire so a PLAIN `claude` (no flags, no `run` wrapper) offloads to the
+	// 4. Auto-wire so a PLAIN `claude` (no flags, no `run` wrapper) offloads to the
 	// worker. CC auto-discovers a project-root .mcp.json and loads .claude/CLAUDE.md;
 	// the trust prompt for the .mcp.json server is pre-approved by
 	// enableAllProjectMcpServers in settings.json (set in wireSettings) so headless
@@ -357,19 +349,4 @@ files, run tests, or run shell commands yourself — hand the scoped task to the
 tool, which edits files, runs the project's real tests as its gate, and reports back.
 Plan and review here; implement there. (A PreToolUse hook enforces this — delegating
 on the first try just avoids the deny round-trip.)
-`
-
-const workerAgentMD = `---
-name: rig-worker
-description: Heavy-lifting code worker. Runs on your worker model (free/cheap). The MAIN agent delegates every code change, file edit, test run, and knowledge lookup here; it edits files, consults knowledge/search when available, and MUST run the project's real tests as its own gate before returning.
-tools: Read, Edit, Write, Bash, Grep, Glob, mcp__knowledge, mcp__search
----
-
-You are the worker in a subscription-preserving hybrid. Your inference runs on the
-user's worker model; your tools execute natively on this repo. The MAIN agent has
-planned and delegated a scoped task to you.
-
-Do the work end to end: read what you need, make the edits, and **run the project's
-real tests as your own gate before returning**. Report concisely what you changed and
-the test result. If a knowledge/search MCP is configured, use it before guessing.
 `

@@ -2,7 +2,7 @@
 
 **Move the heavy lifting off your paid LLM.** A local proxy that lets Claude Code keep planning on your paid subscription while every code change, file edit, test run, and knowledge lookup is delegated to a **worker model of your choice** — your own local model (llama.cpp / Ollama / ExLlama) or any API endpoint (OpenRouter, …). The worker's output is verified by a deterministic gate before it ever reaches the paid agent, so you save tokens *without* trading away correctness.
 
-> Status: **early / pre-release.** Proxy, translation, hooks, installer, and the reboot-safe daemon are working and validated end-to-end. The savings numbers below come from a small pilot (n=7) — treat them as evidence the mechanism works, then measure on your own workload with `rig-move-llm stats`.
+> Status: **early / pre-release.** Proxy, translation, hooks, installer, and the reboot-safe daemon are working and validated end-to-end. The savings number below is a single measured instance (n=1) — treat it as evidence the mechanism produces a real saving on a real fix, then measure your own workload with `rig-move-llm stats`.
 
 ## Why
 
@@ -15,34 +15,37 @@ On a subscription, the only lever is **paid-agent output tokens**. `rig-move-llm
 
 Headless / AFK oriented (worker models are slower than the frontier); not aimed at interactive latency.
 
-## What you save — honest numbers
+## What you save
 
-Measured on a 7-task SWE-bench-style Python pilot (main agent = Claude Sonnet both
-sides, worker = a local 27B model, delegation enforced 100% with zero leaks):
+Measured on one hard SWE-bench-style Python instance (flask-4045), main agent = Claude
+Sonnet, worker = a local 27B model, delegation enforced 100% by the hook:
 
-- **Quality: parity, not magic.** 5/7 resolved hybrid vs 5/7 solo. (An earlier run
-  showed 6/7 — one apparent win did not reproduce under re-scoring, so we quote the
-  conservative number.)
-- **Paid-agent output tokens: −28% blended per resolved task** (−14% across the whole
-  run), with **~136k output tokens moved off quota** onto the worker. But the
-  distribution is **bimodal**: heavy tasks saved up to −64%, while light tasks
-  originally *inverted* (+46%, +112% — the fixed plan/review overhead cost more than
-  the work saved).
-- **The cut-review gate is the cost floor.** It replaces the paid agent's re-review of
-  worker output with a deterministic gate (frozen fail-before repro + compile/lint
-  floor + scoped regression). Re-running the two inverted tasks with it: **+46% → −4.9%**
-  and **+112% → −26%**, same resolution outcomes, **zero fail-open** across all verdict
-  paths. This floor is structural — it does not depend on how good your worker model is.
-- **Wall time: ~8× slower** than solo (worker throughput). This tool is for headless /
-  AFK / overnight work, not interactive sessions.
+- **Paid-agent output tokens: −37%** — 2,579 billed output tokens vs 4,069 solving the
+  same fix solo. Every edit and test run — the heavy work — executed on the local
+  worker, off your Anthropic quota. (A terser configuration reached −52% but skipped the
+  review round that catches worker fallout; the shipping default keeps a mandatory
+  regression check, so −37% is the number you actually get.)
+- **Correctness held.** The target test passed and no pre-existing test regressed — and
+  a solo baseline left this same instance *unresolved*, so here the hybrid solved what
+  solo could not. This is not the general rule (see variance disclosure below); it is
+  one honest data point.
+- **Wall time: slower** — ~20 min here vs a few minutes solo (worker throughput). This
+  tool is for headless / AFK / overnight work, not interactive latency.
+
+This is **n=1**. It shows the mechanism produces a real output-token saving on a real
+fix; it is not a benchmark. An earlier 7-task pilot of the predecessor (base-URL)
+design showed the same *shape* — quality roughly at parity and output savings that are
+**bimodal** (heavy tasks save the most; trivial tasks can cost more than they save,
+because the fixed plan/review overhead dominates the little work delegated). That is why
+this tool targets heavy, headless work. Measure your own with `rig-move-llm stats`.
 
 ### What "savings" means, precisely
 
 - **Quota is counted server-side.** Worker requests go to *your* endpoint and never
   reach api.anthropic.com — worker generation is 100% outside your Anthropic quota.
 - **It is not "100% free."** Worker output that the main agent reads back counts as
-  main-agent *input* tokens. Input is ~5× cheaper than output, and cut-review shrinks
-  what the main agent reads to a short verdict — but it is not zero.
+  main-agent *input* tokens. Input is ~5× cheaper than output, and the deterministic
+  gate shrinks what the main agent reads back to a short verdict — but it is not zero.
 - **Client-side displays lie a little.** Claude Code's `/cost` (and tools like ccusage)
   count tokens the client saw, including rerouted worker traffic — that display is
   cosmetic, not your bill. `rig-move-llm stats` separates the legs honestly; its
@@ -137,19 +140,24 @@ rig-move-llm stats [--reset|--history]       token accounting / savings
 
 Claude Code's experimental agent teams work under rig with no extra setup. In the
 default **in-process** backend each teammate shares the lead's process and its tool
-calls already carry an `agent_id`, so the force-delegate hook treats teammates as
-workers automatically while the lead stays plan/delegate/review-only.
+calls already carry an `agent_id`, so the force-delegate hook treats teammates as the
+workers (allows their tools) while the lead stays plan/delegate/review-only.
 
 The **terminal backends** (`--teammate-mode tmux|iterm2`) spawn each teammate as a
 separate `claude` process whose hook payloads have no `agent_id` — they would
 otherwise be mistaken for the paid lead and denied every tool. `rig-move-llm run`
 points `CLAUDE_CODE_TEAMMATE_COMMAND` at itself so it can stamp the teammate's
 identity (`RIG_AGENT_ID`, which the hook honors like `agent_id`) and, by default,
-pin the teammate to the worker tier so its inference runs on your endpoint. Set
+pin the teammate to a cheaper model tier (`--model haiku`). Set
 `RIG_TEAMMATE_MODEL=inherit` to keep the model the lead requested, or
 `RIG_TEAMMATE_MODEL=<name>` to force a specific one. A launcher you set yourself in
-`CLAUDE_CODE_TEAMMATE_COMMAND` is never overwritten. Teams are interactive-only
-(headless `-p` has no teams), so this path is not exercised by rig's CI smokes.
+`CLAUDE_CODE_TEAMMATE_COMMAND` is never overwritten.
+
+Note the scope honestly: model-pinning selects a cheaper **Anthropic** tier, it does
+not route teammate inference to your worker endpoint — off-quota offload goes through
+`mcp__worker__implement`, not the team path. Teams are interactive-only (headless `-p`
+has no teams), so this path is not exercised by rig's CI smokes; treat it as
+experimental.
 
 ## Layout
 
@@ -176,4 +184,4 @@ Cross-compile is pure-Go (`CGO_ENABLED=0`); CI builds all six targets
 
 ## License
 
-TBD.
+MIT — see [LICENSE](LICENSE).

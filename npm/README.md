@@ -7,11 +7,13 @@ knowledge lookup is delegated to a **worker model of your choice** — a local m
 
 ```sh
 npx rig-move-llm@latest init      # auto-detects a local worker; wires this project
-npx rig-move-llm run -- claude     # launch Claude Code with the proxy in place
+claude                             # plain Claude Code — auto-delegates to the worker, no flags
 ```
 
-Add `--global` to `init` to install for every project. Reverse it with
-`npx rig-move-llm uninstall`.
+`init` wires Claude Code so a plain `claude` offloads code work to the worker with no
+flags or wrapper. `npx rig-move-llm run -- claude` also works when you want the proxy's
+per-project routing / observability on the main leg. Add `--global` to `init` to install
+for every project; reverse it with `npx rig-move-llm uninstall`.
 
 This npm package ships a single prebuilt static binary per platform (via
 `optionalDependencies`, the esbuild/biome pattern — no postinstall download).

@@ -118,7 +118,8 @@ func (s *Server) onInitialize(params json.RawMessage) map[string]any {
 	}
 }
 
-// toolList is the tools/list payload: the single implement tool.
+// toolList is the tools/list payload: implement (Stage 2), explore (Stage 0),
+// and triage (the Gate A intake declaration).
 func toolList() []map[string]any {
 	return []map[string]any{{
 		"name":        "implement",
@@ -132,6 +133,28 @@ func toolList() []map[string]any {
 			},
 			"required": []string{"task"},
 		},
+	}, {
+		"name":        "explore",
+		"description": "Stage 0: the free worker explores the repo for a task and returns a distilled, machine-verified context — relevant files, grounded candidate edit sites (path:line + verbatim snippet, verified against disk), entrypoints/repro, and declared blind spots. It runs to completion in this one call (rig loops internally over large repos), so call it ONCE, before reading the repo yourself; then spot-check 2-3 citations and call triage.",
+		"inputSchema": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"task": map[string]any{"type": "string", "description": "The task to ground, with enough detail to search on."},
+				"repo": map[string]any{"type": "string", "description": "Absolute path to the repo checkout. Defaults to the server's working directory."},
+			},
+			"required": []string{"task"},
+		},
+	}, {
+		"name":        "triage",
+		"description": "Declare the intake decision after explore: solo (single obvious small edit at a verified site — you edit it yourself) or delegate (multi-file / needs investigation / uncertain — hand to implement). A deterministic consistency check against the Stage-0 evidence may override solo to delegate. If unsure, declare delegate.",
+		"inputSchema": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"decision": map[string]any{"type": "string", "enum": []string{"solo", "delegate"}},
+				"reason":   map[string]any{"type": "string", "description": "One line: why this decision, citing the Stage-0 evidence."},
+			},
+			"required": []string{"decision", "reason"},
+		},
 	}}
 }
 
@@ -143,7 +166,14 @@ func (s *Server) onToolsCall(params json.RawMessage) (map[string]any, *rpcError)
 	if err := json.Unmarshal(params, &call); err != nil {
 		return nil, &rpcError{Code: -32602, Message: "bad params: " + err.Error()}
 	}
-	if call.Name != "implement" {
+	switch call.Name {
+	case "implement":
+		// falls through to the loop below
+	case "explore":
+		return s.onExplore(call.Arguments), nil
+	case "triage":
+		return s.onTriage(call.Arguments), nil
+	default:
 		return nil, &rpcError{Code: -32602, Message: "unknown tool: " + call.Name}
 	}
 
@@ -174,6 +204,43 @@ func (s *Server) onToolsCall(params json.RawMessage) (map[string]any, *rpcError)
 	logStderr("worker.implement done stopped=%s iters=%d in=%d out=%d files=%v",
 		res.Stopped, res.Iterations, res.InputTokens, res.OutputTokens, res.FilesChanged)
 	return toolText(string(body), res.Stopped == "error"), nil
+}
+
+// onExplore runs the Stage-0 explore loop and returns the gated report.
+func (s *Server) onExplore(arguments json.RawMessage) map[string]any {
+	var args struct {
+		Task string `json:"task"`
+		Repo string `json:"repo"`
+	}
+	_ = json.Unmarshal(arguments, &args)
+	if strings.TrimSpace(args.Task) == "" {
+		return toolText(`{"error":"task is required"}`, true)
+	}
+	if args.Repo == "" {
+		args.Repo, _ = os.Getwd()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), runTimeout())
+	defer cancel()
+	logStderr("worker.explore repo=%s", args.Repo)
+	res := s.engine.Explore(ctx, args.Repo, args.Task)
+	body, _ := json.MarshalIndent(res, "", "  ")
+	logStderr("worker.explore done stopped=%s iters=%d anchors=%d read=%d sites=%d rejected=%d",
+		res.Stopped, res.Iterations, len(res.Anchors), len(res.AnchorsRead), len(res.CandidateEditSites), len(res.RejectedSites))
+	return toolText(string(body), res.Stopped == "error")
+}
+
+// onTriage records MAIN's intake declaration (Gate A) and returns the effective
+// decision after the consistency backstop.
+func (s *Server) onTriage(arguments json.RawMessage) map[string]any {
+	var args struct {
+		Decision string `json:"decision"`
+		Reason   string `json:"reason"`
+	}
+	_ = json.Unmarshal(arguments, &args)
+	out := s.engine.Triage(args.Decision, args.Reason, s.engine.cfg.GateMode)
+	body, _ := json.MarshalIndent(out, "", "  ")
+	logStderr("worker.triage declared=%s effective=%s overridden=%v", out.Declared, out.Effective, out.Overridden)
+	return toolText(string(body), false)
 }
 
 // toolText wraps a text payload in the MCP tools/call result envelope.

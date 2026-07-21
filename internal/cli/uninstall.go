@@ -68,6 +68,7 @@ func cmdUninstall(args []string) int {
 	}
 	removeOwnedSteer(filepath.Join(claudeDir, "CLAUDE.md"))
 	remove(filepath.Join(claudeDir, "output-styles", "rig-delegate.md"))
+	remove(filepath.Join(claudeDir, "output-styles", "rig-explore.md"))
 	// prune the output-styles dir if we left it empty
 	_ = os.Remove(filepath.Join(claudeDir, "output-styles"))
 
@@ -95,7 +96,7 @@ func stripRigHooks(path string) error {
 	// We reach stripRigHooks only when no pre-init backup exists (settings.json was
 	// created fresh by init), so removing our injected keys is safe here.
 	delete(settings, "enableAllProjectMcpServers")
-	if settings["outputStyle"] == "rig-delegate" {
+	if settings["outputStyle"] == "rig-delegate" || settings["outputStyle"] == "rig-explore" {
 		delete(settings, "outputStyle")
 	}
 	hooks, ok := settings["hooks"].(map[string]any)

@@ -88,11 +88,41 @@ WORKER_MODEL=qwen2.5-coder:32b
 WORKER_API_KEY=...                               # or an OpenRouter key: https://openrouter.ai/api/v1
 MAIN_UPSTREAM_URL=https://api.anthropic.com
 PORT=4000
+WORKER_HEALTH_PATH=/v1/models                    # health-check probed each message; set off to disable
 ```
 
 The setup wizard collects these for you — this is what it writes to `config.env`. Scope is
 **global** (all projects, follows you) or **project** (this dir only); `ENABLED` gates the whole
 thing on/off.
+
+### Automatic worker fallback (zero-token)
+
+The worker endpoint is bring-your-own, so it can be down when Claude Code is not. At the **start of
+every message** rig fires a **health check** — a plain HTTP `GET` on `WORKER_HEALTH_PATH` (no LLM
+tokens). If it **passes**, offload runs normally. If it **fails**, that turn automatically degrades
+to plain Claude Code (same as `ENABLED=false`): the force-delegate hooks pass through so the main
+agent edits and runs tests locally instead of blocking on a dead worker, and a one-line notice
+(`⚠️ worker healthcheck failed … falling back to local`) shows in the process stream. When the
+worker comes back, the next message resumes offload — all automatic, nothing to toggle.
+
+`WORKER_HEALTH_PATH` defaults to `/v1/models` (the universal, free liveness probe on any
+OpenAI-compatible endpoint); point it at `/health` for a server that exposes one, or set it to `off`
+to skip the pre-flight probe. Even with the probe off, a worker call that errors mid-turn falls back
+to local automatically. Tune with `WORKER_HEALTH_TIMEOUT_MS` (default 2000) and
+`WORKER_HEALTH_CACHE_SEC` (default 15, reuses a recent probe result across rapid turns).
+
+### Worker context budget (anti-hallucination checkpoint)
+
+A long implement or explore run can outgrow the worker model's context window — and an over-long
+context is exactly when a local model starts to hallucinate (one giant unverified edit instead of
+small, tested steps). rig watches the **real** context size (`usage.prompt_tokens` returned by every
+chat turn) and, when it crosses `RIG_WORKER_CTX_LIMIT` (default **48000** tokens — sized for a 64k
+local window; raise it for 128k/200k models), **checkpoints**: the conversation is reset and reseeded
+with a rig-assembled digest — the task, the current `git diff` from disk (the work so far — nothing
+is lost), the last test output, and the files already read. The worker is never asked to summarize
+itself, so the reset removes the bloated context rather than distilling it through a confused model.
+The worker stays a plain OpenAI-compatible endpoint; nothing special is required of it. The result's
+`checkpoints` field reports how many times this fired.
 
 ## Install & use
 

@@ -2,7 +2,7 @@
 // subcommands, dispatched from a bare os.Args slice (stdlib flag, no framework).
 //
 //	rig-move-llm serve [--port N]        run the routing proxy
-//	rig-move-llm hook  pre-tool|post-tool  Claude Code hook (reads stdin)
+//	rig-move-llm hook  pre-tool|post-tool|session-start|user-prompt  Claude Code hook (reads stdin)
 //	rig-move-llm init  [--global] ...     bootstrap config + wiring for a scope
 //	rig-move-llm run   [--] <cmd...>      launch a command with the proxy wired in
 //	rig-move-llm stats [--reset|--history] token accounting (observability)
@@ -53,7 +53,7 @@ Run
   rig-move-llm serve  [--port N] [--status]  run the routing proxy / report its state
 
 Internal (invoked by Claude Code / MCP; rarely run by hand)
-  rig-move-llm hook   pre-tool|post-tool|session-start  Claude Code hook (reads stdin)
+  rig-move-llm hook   pre-tool|post-tool|session-start|user-prompt  Claude Code hook (reads stdin)
   rig-move-llm worker                      run the worker MCP server on stdio (offload tool)
 
   rig-move-llm version
@@ -196,8 +196,13 @@ func cmdHook(args []string) int {
 		// .rig-move-llm/ carrying the configured settings, the way Serena creates
 		// .serena on first session. Context-only; never blocks the session.
 		return cmdSessionStart(os.Stdin, os.Stdout)
+	case "user-prompt":
+		// UserPromptSubmit hook: probe the worker endpoint (zero-token HTTP GET) and
+		// cache the verdict so the per-tool hooks degrade to plain Claude Code when
+		// the worker is unreachable. Never blocks the prompt.
+		return cmdUserPrompt(os.Stdin, os.Stdout)
 	default:
-		fmt.Fprintf(os.Stderr, "hook: unknown phase %q (want pre-tool|post-tool|session-start)\n", args[0])
+		fmt.Fprintf(os.Stderr, "hook: unknown phase %q (want pre-tool|post-tool|session-start|user-prompt)\n", args[0])
 		return 2
 	}
 	return 0
@@ -234,11 +239,15 @@ func buildHookState() *hook.State {
 		}
 	}
 	return &hook.State{
-		Enabled:    cfg.Enabled,
-		LogPath:    filepath.Join(dir, "force-delegate.log"),
-		GatePaths:  filepath.Join(dir, "gate_paths"),
-		GateRunner: runner,
-		SharedMCP:  parseList(os.Getenv("MAIN_SHARED_MCP")),
+		Enabled:      cfg.Enabled,
+		LogPath:      filepath.Join(dir, "force-delegate.log"),
+		GatePaths:    filepath.Join(dir, "gate_paths"),
+		GateRunner:   runner,
+		SharedMCP:    parseList(os.Getenv("MAIN_SHARED_MCP")),
+		HealthMarker: hook.HealthMarkerPath(dir),
+		HealthTTL:    10 * time.Minute,
+		GateMode:     cfg.GateMode,
+		StateDir:     dir,
 	}
 }
 

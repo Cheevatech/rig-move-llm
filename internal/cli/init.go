@@ -23,8 +23,6 @@ type initOpts struct {
 	workerKey    string
 	mainUpstream string
 	port         string
-	knowledgeURL string
-	searchURL    string
 	enabled      bool // ENABLED written to config; false = wired but inert (Claude Code runs normally)
 	npxWorker    bool // spawn the worker MCP as `npx -y rig-move-llm worker` (zero global install)
 	service      bool
@@ -45,8 +43,6 @@ func cmdInit(args []string) int {
 	workerKey := fs.String("worker-key", "", "worker API key (optional for local models)")
 	mainUpstream := fs.String("main-upstream", "https://api.anthropic.com", "paid (main-leg) upstream")
 	port := fs.String("port", "4000", "proxy listen port")
-	knowledgeURL := fs.String("knowledge-url", "", "optional knowledge MCP SSE URL")
-	searchURL := fs.String("search-url", "", "optional search MCP SSE URL")
 	npx := fs.Bool("npx", false, "spawn the worker via `npx -y rig-move-llm worker` (no global binary needed)")
 	force := fs.Bool("force", false, "overwrite an existing config file")
 	noDetect := fs.Bool("no-detect", false, "skip probing for a local worker endpoint")
@@ -75,7 +71,7 @@ func cmdInit(args []string) int {
 	return applyInit(initOpts{
 		global: *global, backend: *backend, workerBase: *workerBase,
 		workerModel: *workerModel, workerKey: *workerKey, mainUpstream: *mainUpstream,
-		port: *port, knowledgeURL: *knowledgeURL, searchURL: *searchURL,
+		port: *port,
 		// A worker endpoint was configured -> enable; otherwise stay inert.
 		enabled:   *workerBase != "" || *backend != "",
 		npxWorker: *npx, service: *svc, force: *force, noDetect: *noDetect,
@@ -106,7 +102,7 @@ func applyInit(o initOpts) int {
 		if err := os.WriteFile(cfgPath, []byte(renderConfigEnv(configEnvVals{
 			backend: o.backend, workerBase: o.workerBase, workerModel: o.workerModel,
 			workerKey: o.workerKey, mainUpstream: o.mainUpstream, port: o.port,
-			knowledgeURL: o.knowledgeURL, searchURL: o.searchURL, enabled: o.enabled,
+			enabled: o.enabled,
 		})), 0o600); err != nil {
 			fmt.Fprintln(os.Stderr, "init: write config:", err)
 			return 1
@@ -137,7 +133,7 @@ func applyInit(o initOpts) int {
 		fmt.Fprintln(os.Stderr, "init:", err)
 		return 1
 	}
-	if err := wireSettings(filepath.Join(claudeDir, "settings.json"), filepath.Join(dataDir, "settings.json.bak")); err != nil {
+	if err := wireSettings(filepath.Join(claudeDir, "settings.json"), filepath.Join(dataDir, "settings.json.bak"), config.Load().GateMode); err != nil {
 		fmt.Fprintln(os.Stderr, "init: settings:", err)
 		return 1
 	}
@@ -147,7 +143,7 @@ func applyInit(o initOpts) int {
 	// toolbelt) served as a one-off file. Bare `claude` ignores this; it reads the
 	// project-root .mcp.json (local) or the user-scope ~/.claude.json (global).
 	mcpPath := filepath.Join(dataDir, "mcp.json")
-	if err := os.WriteFile(mcpPath, []byte(renderMCP(o.knowledgeURL, o.searchURL, o.npxWorker)), 0o644); err != nil {
+	if err := os.WriteFile(mcpPath, []byte(renderMCP(o.npxWorker)), 0o644); err != nil {
 		fmt.Fprintln(os.Stderr, "init: mcp:", err)
 		return 1
 	}
@@ -167,7 +163,7 @@ func applyInit(o initOpts) int {
 		fmt.Println("registered worker at user scope in", userClaudeJSON())
 	} else {
 		rootMCP := filepath.Join(".", ".mcp.json")
-		if err := os.WriteFile(rootMCP, []byte(renderMCP(o.knowledgeURL, o.searchURL, o.npxWorker)), 0o644); err != nil {
+		if err := os.WriteFile(rootMCP, []byte(renderMCP(o.npxWorker)), 0o644); err != nil {
 			fmt.Fprintln(os.Stderr, "init: root mcp:", err)
 			return 1
 		}
@@ -185,7 +181,15 @@ func applyInit(o initOpts) int {
 		fmt.Fprintln(os.Stderr, "init: output style:", err)
 		return 1
 	}
-	fmt.Println("wrote terse-delegate output style", stylePath)
+	// The soft-gate (explore-first) sibling style is always written too; which one
+	// is ACTIVE is decided by wireSettings from GATE_MODE, so flipping the mode is
+	// a config change + settings rewire, not a reinstall.
+	explorePath := filepath.Join(claudeDir, "output-styles", "rig-explore.md")
+	if err := os.WriteFile(explorePath, []byte(exploreStyleMD), 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, "init: output style:", err)
+		return 1
+	}
+	fmt.Println("wrote output styles", stylePath, explorePath)
 
 	// 4c. Delegate-only steer (guidance, not enforcement). Never clobber a user's
 	// CLAUDE.md: write only when absent (or already ours).
@@ -232,7 +236,6 @@ func applyInit(o initOpts) int {
 
 type configEnvVals struct {
 	backend, workerBase, workerModel, workerKey, mainUpstream, port string
-	knowledgeURL, searchURL                                         string
 	enabled                                                         bool
 }
 
@@ -265,6 +268,10 @@ func renderConfigEnv(v configEnvVals) string {
 	kv("paid main-leg upstream (raw passthrough, OAuth untouched)", "MAIN_UPSTREAM_URL", v.mainUpstream)
 	kv("proxy listen port", "PORT", v.port)
 	b.WriteString("\n")
+	kv("worker health-check path probed at each message start (default /v1/models; set off to disable — call-time fallback still applies)", "WORKER_HEALTH_PATH", "")
+	kv("health probe timeout in ms (default 2000)", "WORKER_HEALTH_TIMEOUT_MS", "")
+	kv("reuse a health probe result for this many seconds (default 15)", "WORKER_HEALTH_CACHE_SEC", "")
+	b.WriteString("\n")
 	kv("set LOG_BODIES=1 to log full request/response bodies (default: metadata only)", "LOG_BODIES", "")
 	kv("size cap in MB for logs/requests.jsonl; past it the oldest half is compacted away (default 50)", "LOG_MAX_MB", "")
 	kv("MCP servers the MAIN agent may still use, comma-separated (default: none)", "MAIN_SHARED_MCP", "")
@@ -282,19 +289,19 @@ func workerMCPEntry(npx bool) map[string]any {
 	return map[string]any{"type": "stdio", "command": "rig-move-llm", "args": []string{"worker"}}
 }
 
-func renderMCP(knowledgeURL, searchURL string, npx bool) string {
+// renderMCP builds the CC-side .mcp.json. rig-move injects ONLY its own `worker`
+// server — never the user's other MCPs. Knowledge and SOFA-search are deliberately
+// absent: they are violin-native capabilities served behind the worker's generic
+// OpenAI endpoint (server-side enrichment), not MCP tools CC or the worker sees.
+// See map5 (local-enrichment) — enrichment moved server-side so the OSS client
+// stays a plain OpenAI client with no coupling to our compute.
+func renderMCP(npx bool) string {
 	servers := map[string]any{
 		// The worker MCP server is the Option-2 offload mechanism: CC spawns it on
 		// stdio and calls its `implement` tool, whose agentic loop runs on the
 		// configured worker endpoint (guaranteed egress, independent of CC's
 		// in-process agent runtime — see ticket P9).
 		"worker": workerMCPEntry(npx),
-	}
-	if knowledgeURL != "" {
-		servers["knowledge"] = map[string]string{"type": "sse", "url": knowledgeURL}
-	}
-	if searchURL != "" {
-		servers["search"] = map[string]string{"type": "sse", "url": searchURL}
 	}
 	out, _ := json.MarshalIndent(map[string]any{"mcpServers": servers}, "", "  ")
 	return string(out) + "\n"
@@ -363,7 +370,7 @@ func modelNote(model string) string {
 // wireSettings merges the rig-move-llm hooks into an existing (or new) Claude Code
 // settings.json, preserving unrelated keys. The original file is backed up once to
 // backupPath so `uninstall` can restore it verbatim.
-func wireSettings(path, backupPath string) error {
+func wireSettings(path, backupPath, gateMode string) error {
 	settings := map[string]any{}
 	if data, err := os.ReadFile(path); err == nil {
 		_ = json.Unmarshal(data, &settings)
@@ -376,11 +383,15 @@ func wireSettings(path, backupPath string) error {
 	// hang on the MCP trust dialog (see memory cc-persistent-autowire-recipe).
 	settings["enableAllProjectMcpServers"] = true
 
-	// Activate the terse-delegate output style (written by init to
-	// .claude/output-styles/rig-delegate.md) — the system-prompt-tier workflow that
-	// keeps MAIN terse + delegating, recovering the token savings a plain CLAUDE.md
-	// could not (P10). Loaded by bare `claude` at session start; no CLI flag.
-	settings["outputStyle"] = "rig-delegate"
+	// Activate the output style — the system-prompt-tier workflow lever (P10).
+	// hard gate = terse plan→delegate→review; soft gate (map6) = explore-first:
+	// Stage-0 explore → triage solo|delegate → act. Loaded by bare `claude` at
+	// session start; no CLI flag.
+	if gateMode == "soft" {
+		settings["outputStyle"] = "rig-explore"
+	} else {
+		settings["outputStyle"] = "rig-delegate"
+	}
 
 	settings["hooks"] = map[string]any{
 		"PreToolUse": []any{map[string]any{
@@ -399,6 +410,12 @@ func wireSettings(path, backupPath string) error {
 		"SessionStart": []any{map[string]any{
 			"matcher": "startup|resume",
 			"hooks":   []any{map[string]any{"type": "command", "command": "rig-move-llm hook session-start"}},
+		}},
+		// UserPromptSubmit: probe the worker endpoint once per message (zero-token
+		// HTTP GET). An unreachable worker flips the per-tool hooks to passthrough so
+		// the hybrid degrades to plain Claude Code automatically. Never blocks.
+		"UserPromptSubmit": []any{map[string]any{
+			"hooks": []any{map[string]any{"type": "command", "command": "rig-move-llm hook user-prompt"}},
 		}},
 	}
 
@@ -447,6 +464,47 @@ job is ONLY:
 Be terse in every message: a brief plan, the delegation, a brief review. No verbose
 explanations, no restating the task, no narrating what you are about to do. Prefer
 delegating on the first try to avoid wasted round-trips.
+`
+
+// exploreStyleMD is the soft-gate (map6) workflow: offload the READING to the
+// free worker first, decide solo|delegate on grounded evidence, and use the
+// bounded solo/repair windows the hook opens instead of paying delegation
+// round-trips for tiny changes.
+const exploreStyleMD = `---
+name: rig-explore
+description: Explore-first cost-aware orchestrator - Stage-0 worker explore, evidence-based triage, solo tiny edits or delegate.
+keep-coding-instructions: true
+---
+
+You are the MAIN agent in a subscription-preserving hybrid. Your inference is paid;
+the worker (a local/cheap model behind the mcp__worker__* tools) is free. Reading the
+repo yourself is the biggest cost sink — offload it. Workflow, in order:
+
+1. EXPLORE (Stage 0, free) — for any task that touches the repo, FIRST call
+   mcp__worker__explore ONCE with the task. It returns machine-verified evidence:
+   relevant files, candidate edit sites (path:line + verbatim snippets checked
+   against disk), entrypoints/repro, and declared blind spots. It runs to
+   completion in that single call (rig explores large repos in internal rounds),
+   so you do not loop it. Do not pre-read the repo yourself; at most spot-check
+   2-3 of the returned citations with Read.
+2. TRIAGE (Gate A) — call mcp__worker__triage with decision "solo" or "delegate"
+   plus a one-line reason citing the evidence. solo = ONE obvious small edit at a
+   verified site, no open questions. delegate = multi-file, needs investigation or
+   repro, ambiguous, or ANY uncertainty. The declaration is checked against the
+   evidence and may be overridden to delegate — accept the effective decision.
+3. ACT —
+   - solo: make the small edit yourself at the verified site (the hook allows only
+     the grounded files, size-bounded), then verify via the worker or close.
+   - delegate: call mcp__worker__implement with a scoped spec that INCLUDES the
+     Stage-0 evidence (files, sites, repro) so the worker does not re-explore.
+4. REVIEW — read the worker's summary, diff, and gate result. Confirm no NEW test
+   failure (the worker must have run the full affected test file(s), not just the
+   target test); hit_iteration_cap=true means extra scrutiny. If the returned work
+   has a TINY residue (typo-scale, a couple of lines), patch it directly — a short
+   repair window is open after each worker return. Anything bigger: re-delegate.
+
+Be terse in every message: brief plan, the tool calls, a brief review, a one-line
+close (files changed + outcome). No verbose explanations, no restating the task.
 `
 
 const delegateSteerMD = steerSentinel + `

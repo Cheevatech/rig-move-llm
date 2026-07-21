@@ -31,6 +31,19 @@ type Config struct {
 	LogBodies       bool   // opt-in full request/response logging (default: metadata only)
 	LogMaxMB        int    // size cap for logs/requests.jsonl before compaction (default 50)
 	DataDir         string // scope dir where logs/stats are written (resolved local|global)
+	// WorkerHealthPath is the path probed at UserPromptSubmit to decide whether the
+	// worker endpoint is reachable. Default "/v1/models" (universal + free across
+	// OpenAI-compatible servers). Set to "off"/"none"/"-" to disable pre-flight
+	// health-checking (call-time error fallback still applies).
+	WorkerHealthPath string
+	HealthTimeoutMs  int // per-probe HTTP timeout (default 2000)
+	HealthCacheSec   int // reuse a probe result for this many seconds (default 15)
+	// GateMode selects the delegation posture (map6 cost-aware gate):
+	//   "hard" (default) — MAIN is plan/delegate/review only; every Edit is denied.
+	//   "soft"           — explore-first: Stage-0 evidence + a triage declaration can
+	//                      open a bounded solo edit window, and a small Gate B repair
+	//                      window opens after each worker return. Rollback = flip the key.
+	GateMode string
 }
 
 // GlobalDir returns ~/.rig-move-llm.
@@ -124,6 +137,21 @@ func LoadFrom(projectDir string) Config {
 		logMaxMB = n
 	}
 
+	// Health-check: default to the universal /v1/models probe unless the key was
+	// explicitly set (an explicit empty value disables it, same as "off").
+	healthPath := "/v1/models"
+	if v, ok := getOK("WORKER_HEALTH_PATH"); ok {
+		healthPath = strings.TrimSpace(v)
+	}
+	healthTimeout := 2000
+	if n, err := strconv.Atoi(strings.TrimSpace(get("WORKER_HEALTH_TIMEOUT_MS"))); err == nil && n > 0 {
+		healthTimeout = n
+	}
+	healthCache := 15
+	if n, err := strconv.Atoi(strings.TrimSpace(get("WORKER_HEALTH_CACHE_SEC"))); err == nil && n >= 0 {
+		healthCache = n
+	}
+
 	// Master switch. Absent -> enabled only when a worker endpoint is configured
 	// (skipping the worker in setup leaves it off, so Claude Code runs normally);
 	// an explicit ENABLED wins either way, so a user can pre-wire everything and
@@ -133,17 +161,26 @@ func LoadFrom(projectDir string) Config {
 		enabled = truthy(v)
 	}
 
+	gateMode := strings.ToLower(strings.TrimSpace(get("GATE_MODE")))
+	if gateMode != "soft" {
+		gateMode = "hard"
+	}
+
 	return Config{
-		Port:            port,
-		MainUpstreamURL: strings.TrimRight(get("MAIN_UPSTREAM_URL"), "/"),
-		WorkerAPIBase:   workerBase,
-		WorkerAPIKey:    get("WORKER_API_KEY"),
-		WorkerModel:     get("WORKER_MODEL"),
-		Backend:         backend,
-		Enabled:         enabled,
-		LogBodies:       truthy(get("LOG_BODIES")),
-		LogMaxMB:        logMaxMB,
-		DataDir:         dataDir,
+		Port:             port,
+		MainUpstreamURL:  strings.TrimRight(get("MAIN_UPSTREAM_URL"), "/"),
+		WorkerAPIBase:    workerBase,
+		WorkerAPIKey:     get("WORKER_API_KEY"),
+		WorkerModel:      get("WORKER_MODEL"),
+		Backend:          backend,
+		Enabled:          enabled,
+		LogBodies:        truthy(get("LOG_BODIES")),
+		LogMaxMB:         logMaxMB,
+		DataDir:          dataDir,
+		WorkerHealthPath: healthPath,
+		HealthTimeoutMs:  healthTimeout,
+		HealthCacheSec:   healthCache,
+		GateMode:         gateMode,
 	}
 }
 

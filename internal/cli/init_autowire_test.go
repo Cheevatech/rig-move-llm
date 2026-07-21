@@ -60,6 +60,12 @@ func TestInitAutoWire(t *testing.T) {
 		t.Errorf("enableAllProjectMcpServers not set: %v", settings["enableAllProjectMcpServers"])
 	}
 
+	// 2a. UserPromptSubmit health-check hook wired (zero-token worker liveness probe)
+	if !strings.Contains(string(sData), "UserPromptSubmit") ||
+		!strings.Contains(string(sData), "rig-move-llm hook user-prompt") {
+		t.Errorf("settings.json missing UserPromptSubmit health-check hook: %s", sData)
+	}
+
 	// 2b. output style file + activation key (the savings-recovery lever, P10-C)
 	if settings["outputStyle"] != "rig-delegate" {
 		t.Errorf("outputStyle not set to rig-delegate: %v", settings["outputStyle"])

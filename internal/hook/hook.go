@@ -27,6 +27,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/Cheevatech/rig-move-llm/internal/gatestate"
 )
 
 // payload is the subset of the Claude Code hook stdin we consume.
@@ -36,7 +38,23 @@ type payload struct {
 	ToolInput struct {
 		FilePath        string `json:"file_path"`
 		RunInBackground *bool  `json:"run_in_background"`
+		// Edit / Write / MultiEdit bodies — used by the soft gate to size-bound
+		// MAIN's solo and Gate B repair edits.
+		NewString string `json:"new_string"`
+		Content   string `json:"content"`
+		Edits     []struct {
+			NewString string `json:"new_string"`
+		} `json:"edits"`
 	} `json:"tool_input"`
+}
+
+// editSize is the byte size of the new content a MAIN edit would introduce.
+func editSize(p payload) int {
+	n := len(p.ToolInput.NewString) + len(p.ToolInput.Content)
+	for _, e := range p.ToolInput.Edits {
+		n += len(e.NewString)
+	}
+	return n
 }
 
 // State locates the hook's on-disk state (log + gate-path ledger) and the
@@ -53,6 +71,44 @@ type State struct {
 	// SharedMCP is the allowlist of MCP server names the MAIN agent may still use
 	// (e.g. "serena", "headroom"); everything else mcp__* is denied for MAIN.
 	SharedMCP map[string]bool
+	// HealthMarker is the health.json written by the UserPromptSubmit hook. When it
+	// records an unhealthy worker (and is still fresh, per HealthTTL) the per-tool
+	// hooks pass everything through — the hybrid degrades to plain Claude Code
+	// instead of blocking on a dead worker. Empty disables the check.
+	HealthMarker string
+	HealthTTL    time.Duration
+	// GateMode is config.GateMode ("hard"|"soft"). Soft enables the map6
+	// cost-aware windows: a triage-opened solo edit window (Gate A) and a
+	// bounded post-worker repair window (Gate B). StateDir is where the worker
+	// MCP server persists the explore/triage/repair state files.
+	GateMode string
+	StateDir string
+}
+
+// Soft-gate bounds. Solo covers a declared small change at Stage-0-verified
+// sites; repair covers tiny residue fixes after a worker return. A "minor fix"
+// that exceeds these is a worker fail that should be re-delegated, not patched.
+const (
+	soloEditMaxBytes   = 4000
+	repairEditMaxBytes = 2000
+	repairEditCount    = 3
+)
+
+// healthDownActive reports whether the last probe found the worker unreachable and
+// that verdict is still fresh. A missing/healthy/stale marker is treated as up, so
+// the default (and any transient read error) keeps normal force-delegate behaviour.
+func (s *State) healthDownActive() bool {
+	if s.HealthMarker == "" {
+		return false
+	}
+	healthy, ts, ok := ReadHealthMarker(s.HealthMarker)
+	if !ok || healthy {
+		return false
+	}
+	if s.HealthTTL > 0 && time.Since(ts) > s.HealthTTL {
+		return false // stale down-verdict: fail safe back to force-delegate
+	}
+	return true
 }
 
 // effectiveAgentID resolves the subagent identity for the current tool call.
@@ -87,9 +143,11 @@ const denyReason = "Main agent is plan/delegate/review only. Delegate this to th
 func (s *State) PreTool(r io.Reader, w io.Writer) error {
 	p := decode(r)
 
-	// Master switch off: pass everything through. Claude Code runs normally — no
-	// force-delegate, no worker required. This is the "worker skipped" mode.
-	if !s.Enabled {
+	// Master switch off, or the worker failed its health check this turn: pass
+	// everything through. Claude Code runs normally — no force-delegate, no worker
+	// required. The health-down branch is the automatic fallback so a dead worker
+	// endpoint degrades to plain Claude Code instead of blocking MAIN.
+	if !s.Enabled || s.healthDownActive() {
 		return nil
 	}
 
@@ -111,17 +169,32 @@ func (s *State) PreTool(r io.Reader, w io.Writer) error {
 			s.logf("MAIN gate-author %s", fp)
 			return nil
 		}
+		if s.GateMode == "soft" {
+			if allow, reason := s.softEdit(p); allow {
+				return nil
+			} else if reason != "" {
+				return denyMsg(w, reason)
+			}
+		}
 		return deny(w)
 
 	case p.ToolName == "Bash" || p.ToolName == "NotebookEdit":
 		return deny(w)
 
 	case strings.HasPrefix(p.ToolName, "mcp__"):
-		// The offload tool (P9): MAIN's sanctioned way to do code work. Calling it
-		// is the delegate/freeze point — snapshot every authored .gate dir before
-		// the worker runs, so the deterministic gate trusts only the frozen contract.
+		// The offload tool (P9): MAIN's sanctioned way to do code work. Calling
+		// implement is the delegate/freeze point — snapshot every authored .gate
+		// dir before the worker runs, so the deterministic gate trusts only the
+		// frozen contract. The Stage-0 explore/triage tools pass through freely.
 		if mcpServer(p.ToolName) == workerServer {
-			s.freezeGateDirs()
+			if p.ToolName == workerTool {
+				s.freezeGateDirs()
+				// Re-delegating supersedes any open Gate B window; a fresh one
+				// opens when this call returns.
+				if s.StateDir != "" {
+					gatestate.ClearRepair(s.StateDir)
+				}
+			}
 			return nil
 		}
 		// Shared-MCP tier: MAIN keeps the allowlisted servers, is denied the rest.
@@ -140,11 +213,65 @@ func (s *State) PreTool(r io.Reader, w io.Writer) error {
 	return nil
 }
 
+// softEdit is the map6 soft-gate decision for a MAIN Edit/Write. It returns
+// (true, "") to allow, (false, reason) to deny with a specific steer, and
+// (false, "") to fall through to the standard hard deny.
+func (s *State) softEdit(p payload) (bool, string) {
+	if s.StateDir == "" {
+		return false, ""
+	}
+	size := editSize(p)
+
+	// Gate A: a triage-accepted solo window, restricted to the files the Stage-0
+	// evidence grounded (the divergence check).
+	if tr, fresh := gatestate.ReadTriage(s.StateDir); fresh && tr.Decision == "solo" {
+		if !fileAllowed(p.ToolInput.FilePath, tr.SoloFiles) {
+			s.logf("GATEA divergence file=%s allowed=%v", p.ToolInput.FilePath, tr.SoloFiles)
+			return false, "DIVERGENCE: you declared solo but this file is outside the Stage-0 grounded scope (" +
+				strings.Join(tr.SoloFiles, ", ") + "). Re-run mcp__worker__explore + mcp__worker__triage, or delegate to mcp__worker__implement."
+		}
+		if size > soloEditMaxBytes {
+			s.logf("GATEA solo-oversize file=%s bytes=%d", p.ToolInput.FilePath, size)
+			return false, fmt.Sprintf("Solo edit too large (%d bytes > %d): a declared-solo change this big contradicts the triage. Delegate it to mcp__worker__implement.", size, soloEditMaxBytes)
+		}
+		s.logf("GATEA solo-edit file=%s bytes=%d", p.ToolInput.FilePath, size)
+		return true, ""
+	}
+
+	// Gate B: the bounded repair window after a worker return.
+	if rep, open := gatestate.ReadRepair(s.StateDir); open {
+		if size > repairEditMaxBytes {
+			s.logf("GATEB oversize file=%s bytes=%d", p.ToolInput.FilePath, size)
+			return false, fmt.Sprintf("Repair edit too large (%d bytes > %d): residue this big means the worker run failed — re-delegate to mcp__worker__implement instead of rewriting it yourself.", size, repairEditMaxBytes)
+		}
+		rep.EditsLeft--
+		_ = gatestate.WriteRepair(s.StateDir, rep)
+		s.logf("GATEB repair-edit file=%s bytes=%d left=%d", p.ToolInput.FilePath, size, rep.EditsLeft)
+		return true, ""
+	}
+
+	return false, ""
+}
+
+// fileAllowed matches an edited absolute/relative path against the Stage-0
+// grounded file list (repo-relative). Suffix match keeps it working across the
+// hook's and the MCP server's differing path roots.
+func fileAllowed(edited string, allowed []string) bool {
+	edited = filepath.ToSlash(edited)
+	for _, a := range allowed {
+		a = filepath.ToSlash(a)
+		if edited == a || strings.HasSuffix(edited, "/"+a) {
+			return true
+		}
+	}
+	return false
+}
+
 // PostTool implements the gate-verdict PostToolUse hook. On a MAIN delegate
 // return it runs the external gate runner against every frozen contract and, if
 // found, writes an additionalContext block steering MAIN's next move.
 func (s *State) PostTool(r io.Reader, w io.Writer) error {
-	if !s.Enabled {
+	if !s.Enabled || s.healthDownActive() {
 		return nil
 	}
 	p := decode(r)
@@ -157,6 +284,14 @@ func (s *State) PostTool(r io.Reader, w io.Writer) error {
 	if p.ToolName != workerTool && p.ToolName != "Task" && p.ToolName != "Agent" {
 		return nil
 	}
+
+	// Gate B: a worker just returned — open the bounded repair window so MAIN can
+	// patch tiny residue itself instead of paying another delegation round-trip.
+	if s.GateMode == "soft" && s.StateDir != "" && p.ToolName == workerTool {
+		_ = gatestate.WriteRepair(s.StateDir, gatestate.Repair{EditsLeft: repairEditCount, OpenedAt: time.Now()})
+		s.logf("GATEB window-open edits=%d", repairEditCount)
+	}
+
 	dirs := s.readGatePaths()
 	if len(dirs) == 0 {
 		return nil

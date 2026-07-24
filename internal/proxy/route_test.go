@@ -83,6 +83,58 @@ func TestRouteAllToWorkerStreaming(t *testing.T) {
 	}
 }
 
+// TestRoutePrefixLegOverride verifies the per-invocation /r/<leg> path segment
+// overrides the RouteAllToWorker flag in both directions: /r/main reaches the paid
+// upstream even when the flag is globally on (so a cascade escalation is never
+// trapped on qwen), and /r/worker reaches qwen even when the flag is off.
+func TestRoutePrefixLegOverride(t *testing.T) {
+	var workerHit, mainHit bool
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		workerHit = true
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	}))
+	defer worker.Close()
+	main := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mainHit = true
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"id":"x","type":"message","role":"assistant","content":[],"usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer main.Close()
+
+	newServer := func(routeAll bool) http.Handler {
+		dir := t.TempDir()
+		rec, _ := stats.NewRecorder(dir, false)
+		return (&Server{cfg: config.Config{
+			MainUpstreamURL:  main.URL,
+			WorkerAPIBase:    worker.URL,
+			WorkerModel:      "qwen",
+			RouteAllToWorker: routeAll,
+			DataDir:          dir,
+		}, rec: rec}).Handler()
+	}
+
+	body := `{"model":"claude-opus-4-8","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`
+
+	// /r/main with the flag ON must still reach the paid upstream.
+	workerHit, mainHit = false, false
+	if code := postPath(t, newServer(true), "/r/main/v1/messages", body); code != http.StatusOK {
+		t.Fatalf("/r/main status %d", code)
+	}
+	if mainHit != true || workerHit != false {
+		t.Errorf("/r/main (flag on): mainHit=%v workerHit=%v, want main only", mainHit, workerHit)
+	}
+
+	// /r/worker with the flag OFF must still reach qwen.
+	workerHit, mainHit = false, false
+	if code := postPath(t, newServer(false), "/r/worker/v1/messages", body); code != http.StatusOK {
+		t.Fatalf("/r/worker status %d", code)
+	}
+	if workerHit != true || mainHit != false {
+		t.Errorf("/r/worker (flag off): workerHit=%v mainHit=%v, want worker only", workerHit, mainHit)
+	}
+}
+
 // TestRouteAllToWorkerCountTokens verifies the count_tokens shim answers locally
 // (no upstream call) with a positive estimate when routing to the worker.
 func TestRouteAllToWorkerCountTokens(t *testing.T) {

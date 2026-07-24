@@ -44,6 +44,11 @@ type Config struct {
 	//                      open a bounded solo edit window, and a small Gate B repair
 	//                      window opens after each worker return. Rollback = flip the key.
 	GateMode string
+	// VerifyCmd is the shell command `rig cascade` runs to decide whether the
+	// qwen (worker) pass resolved the task (exit 0 = resolved, non-zero = escalate
+	// to Claude). Set via VERIFY_CMD, e.g. "pytest -q". When empty the cascade uses
+	// a weaker compile/lint + non-empty-diff floor instead (see internal/cli).
+	VerifyCmd string
 	// RouteAllToWorker is the route-cc-on-qwen prototype flag (RIG_ROUTE_ALL_TO_WORKER).
 	// When true the proxy stops forwarding /v1/messages to the paid Anthropic upstream
 	// and instead translates every inference to the worker (qwen) leg: an UNMODIFIED
@@ -188,6 +193,7 @@ func LoadFrom(projectDir string) Config {
 		HealthTimeoutMs:  healthTimeout,
 		HealthCacheSec:   healthCache,
 		GateMode:         gateMode,
+		VerifyCmd:        strings.TrimSpace(get("VERIFY_CMD")),
 		RouteAllToWorker: truthy(get("RIG_ROUTE_ALL_TO_WORKER")),
 	}
 }

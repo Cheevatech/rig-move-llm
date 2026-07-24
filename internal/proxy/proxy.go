@@ -124,14 +124,45 @@ func (s *Server) resolveProject(w http.ResponseWriter, r *http.Request) (cfg con
 	return cfg, canon, true
 }
 
-// handle forwards every request to the paid Anthropic upstream. POST /v1/messages
-// is tee-scanned for token usage and folded into the ledger; other paths
-// (count_tokens, GET, etc.) are non-billable passthrough and skip the scanner.
+// routePrefix carries a per-invocation cascade leg override in the base URL path:
+// /r/worker/... forces the qwen (worker) leg; /r/main/... forces the verbatim
+// Anthropic (paid) leg. `rig cascade` sets it for each pass so the shared daemon
+// routes without a restart or a global flag flip. It is stripped before /p/<id>.
+const routePrefix = "/r/"
+
+// stripRoutePrefix removes a leading /r/<leg>/ segment from the request path and
+// returns the leg ("worker" | "main"), or "" when absent. Unknown legs are ignored
+// (treated as absent) so a stray path can never silently mis-route.
+func stripRoutePrefix(r *http.Request) string {
+	if !strings.HasPrefix(r.URL.Path, routePrefix) {
+		return ""
+	}
+	leg, tail, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, routePrefix), "/")
+	if leg != "worker" && leg != "main" {
+		return ""
+	}
+	r.URL.Path = "/" + tail
+	return leg
+}
+
+// handle routes each request. POST /v1/messages goes to the worker (qwen) leg or
+// the paid Anthropic leg per the effective routing decision; the worker leg is
+// translated + folded into the WORKER ledger, the main leg is a tee-scanned
+// verbatim passthrough. Other paths (count_tokens, GET, etc.) are non-billable.
 func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
+	// Per-invocation cascade override is read (and stripped) before project
+	// resolution, which owns the /p/<id> segment that may follow it.
+	leg := stripRoutePrefix(r)
+
 	cfg, project, ok := s.resolveProject(w, r)
 	if !ok {
 		return
 	}
+
+	// Effective routing: an explicit /r/<leg> wins; otherwise the RouteAllToWorker
+	// flag decides. /r/main always reaches Claude even when the flag is globally on,
+	// so a cascade escalation is never trapped on the worker leg.
+	routeWorker := leg == "worker" || (leg == "" && cfg.RouteAllToWorker)
 
 	if r.Method == http.MethodPost && r.URL.Path == "/v1/messages" {
 		body, err := io.ReadAll(r.Body)
@@ -144,9 +175,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			Model string `json:"model"`
 		}
 		_ = json.Unmarshal(body, &peek)
-		// route-cc-on-qwen prototype: translate this inference to the worker (qwen)
-		// instead of forwarding it to the paid Anthropic upstream.
-		if cfg.RouteAllToWorker {
+		if routeWorker {
 			logReq(r.Method, r.URL.Path, peek.Model, "WORKER")
 			s.handleWorkerRoute(w, r, cfg, project, body, peek.Model)
 			return
@@ -158,7 +187,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 
 	// count_tokens has no worker equivalent; answer with a local estimate when
 	// routing to qwen so CC's context pacing still works without an upstream call.
-	if cfg.RouteAllToWorker && r.Method == http.MethodPost && r.URL.Path == "/v1/messages/count_tokens" {
+	if routeWorker && r.Method == http.MethodPost && r.URL.Path == "/v1/messages/count_tokens" {
 		body, _ := io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)

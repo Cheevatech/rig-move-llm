@@ -107,6 +107,8 @@ func Main(args []string) int {
 		return cmdConfig(rest)
 	case "run":
 		return cmdRun(rest)
+	case "cascade":
+		return cmdCascade(rest)
 	case "stats":
 		return cmdStats(rest)
 	case "version", "--version", "-v":

@@ -144,8 +144,25 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			Model string `json:"model"`
 		}
 		_ = json.Unmarshal(body, &peek)
+		// route-cc-on-qwen prototype: translate this inference to the worker (qwen)
+		// instead of forwarding it to the paid Anthropic upstream.
+		if cfg.RouteAllToWorker {
+			logReq(r.Method, r.URL.Path, peek.Model, "WORKER")
+			s.handleWorkerRoute(w, r, cfg, project, body, peek.Model)
+			return
+		}
 		logReq(r.Method, r.URL.Path, peek.Model, "MAIN")
 		s.handleMain(w, r, cfg, project, body, peek.Model, true)
+		return
+	}
+
+	// count_tokens has no worker equivalent; answer with a local estimate when
+	// routing to qwen so CC's context pacing still works without an upstream call.
+	if cfg.RouteAllToWorker && r.Method == http.MethodPost && r.URL.Path == "/v1/messages/count_tokens" {
+		body, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(countTokensEstimate(body))
 		return
 	}
 

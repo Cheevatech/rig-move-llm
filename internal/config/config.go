@@ -44,6 +44,13 @@ type Config struct {
 	//                      open a bounded solo edit window, and a small Gate B repair
 	//                      window opens after each worker return. Rollback = flip the key.
 	GateMode string
+	// RouteAllToWorker is the route-cc-on-qwen prototype flag (RIG_ROUTE_ALL_TO_WORKER).
+	// When true the proxy stops forwarding /v1/messages to the paid Anthropic upstream
+	// and instead translates every inference to the worker (qwen) leg: an UNMODIFIED
+	// Claude Code session runs entirely on qwen, driving CC's own toolset. This is the
+	// prototype that measures whether qwen-driving-CC converges (kills confound B); it
+	// is NOT the cascade — there is no escalation-to-Claude here.
+	RouteAllToWorker bool
 }
 
 // GlobalDir returns ~/.rig-move-llm.
@@ -181,6 +188,7 @@ func LoadFrom(projectDir string) Config {
 		HealthTimeoutMs:  healthTimeout,
 		HealthCacheSec:   healthCache,
 		GateMode:         gateMode,
+		RouteAllToWorker: truthy(get("RIG_ROUTE_ALL_TO_WORKER")),
 	}
 }
 

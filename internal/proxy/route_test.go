@@ -1,0 +1,109 @@
+package proxy
+
+import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/Cheevatech/rig-move-llm/internal/config"
+	"github.com/Cheevatech/rig-move-llm/internal/stats"
+)
+
+// TestRouteAllToWorkerStreaming drives the route-cc-on-qwen prototype leg: an
+// inbound Anthropic streaming request is translated to OpenAI, sent to a stub qwen
+// endpoint, and the OpenAI SSE reply is translated back to the Anthropic event
+// sequence CC expects. The paid upstream is never touched, and usage lands on the
+// WORKER ledger.
+func TestRouteAllToWorkerStreaming(t *testing.T) {
+	var gotBody []byte
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/chat/completions") {
+			t.Errorf("worker path = %s, want .../chat/completions", r.URL.Path)
+		}
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n")
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":40,\"completion_tokens\":5}}\n\n")
+		io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer worker.Close()
+
+	dir := t.TempDir()
+	rec, err := stats.NewRecorder(dir, false)
+	if err != nil {
+		t.Fatalf("recorder: %v", err)
+	}
+	s := &Server{
+		cfg: config.Config{
+			MainUpstreamURL:  "http://must-not-be-called.invalid",
+			WorkerAPIBase:    worker.URL,
+			WorkerModel:      "qwen-coder",
+			RouteAllToWorker: true,
+			DataDir:          dir,
+		},
+		rec: rec,
+	}
+	h := s.Handler()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"claude-opus-4-8","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	rw := httptest.NewRecorder()
+	h.ServeHTTP(rw, req)
+
+	if rw.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rw.Code, rw.Body.String())
+	}
+	// Response must be the Anthropic event sequence, not raw OpenAI.
+	if !strings.Contains(rw.Body.String(), "event: message_start") ||
+		!strings.Contains(rw.Body.String(), "event: message_stop") {
+		t.Errorf("response is not an Anthropic SSE sequence:\n%s", rw.Body.String())
+	}
+	// Outbound worker request must carry the worker model, not the Anthropic one.
+	var oreq struct {
+		Model string `json:"model"`
+	}
+	_ = json.Unmarshal(gotBody, &oreq)
+	if oreq.Model != "qwen-coder" {
+		t.Errorf("worker model = %q, want qwen-coder", oreq.Model)
+	}
+
+	if err := rec.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	got := readLedger(t, dir)
+	if got.WorkerIn != 40 || got.WorkerOut != 5 || got.NWorker != 1 {
+		t.Errorf("worker ledger = in %d out %d n %d, want 40/5/1", got.WorkerIn, got.WorkerOut, got.NWorker)
+	}
+	if got.NMain != 0 {
+		t.Errorf("main ledger n = %d, want 0 (paid upstream must not be touched)", got.NMain)
+	}
+}
+
+// TestRouteAllToWorkerCountTokens verifies the count_tokens shim answers locally
+// (no upstream call) with a positive estimate when routing to the worker.
+func TestRouteAllToWorkerCountTokens(t *testing.T) {
+	s := &Server{cfg: config.Config{RouteAllToWorker: true, WorkerAPIBase: "http://x"}}
+	h := s.Handler()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens",
+		strings.NewReader(`{"model":"claude-opus-4-8","messages":[{"role":"user","content":"count me"}]}`))
+	rw := httptest.NewRecorder()
+	h.ServeHTTP(rw, req)
+
+	if rw.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rw.Code, rw.Body.String())
+	}
+	var out struct {
+		InputTokens int `json:"input_tokens"`
+	}
+	if err := json.Unmarshal(rw.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.InputTokens < 1 {
+		t.Errorf("input_tokens = %d, want >= 1", out.InputTokens)
+	}
+}

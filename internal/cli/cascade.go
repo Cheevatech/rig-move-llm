@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -41,13 +42,31 @@ func cmdCascade(args []string) int {
 		fmt.Fprintln(os.Stderr, "         so the qwen pass is judged by a real executed test before escalating.")
 	}
 
-	addr := "127.0.0.1:" + cfg.Port
-	if !portOpen(addr) {
-		if err := startServe(); err != nil {
-			fmt.Fprintln(os.Stderr, "cascade: could not start proxy:", err)
-			return 1
-		}
-		waitPort(addr, 10*time.Second)
+	// Cascade owns a DEDICATED proxy on a free port started from THIS binary,
+	// rather than reusing whatever listens on cfg.Port. A pre-existing daemon there
+	// may be an older rig without /r/<leg> route support — it would forward
+	// /r/worker/... verbatim upstream (404) and every pass would silently fail. A
+	// private, correct-version proxy makes the two-pass routing deterministic.
+	port, err := freePort()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "cascade: could not find a free port:", err)
+		return 1
+	}
+	self, err := os.Executable()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "cascade: cannot locate own binary:", err)
+		return 1
+	}
+	srv := exec.Command(self, "serve", "--port", port)
+	srv.Stdout, srv.Stderr = nil, nil
+	if err := srv.Start(); err != nil {
+		fmt.Fprintln(os.Stderr, "cascade: could not start proxy:", err)
+		return 1
+	}
+	defer func() { _ = srv.Process.Kill() }()
+	if !waitPort("127.0.0.1:"+port, 10*time.Second) {
+		fmt.Fprintln(os.Stderr, "cascade: proxy did not come up on port "+port)
+		return 1
 	}
 
 	repo, _ := os.Getwd()
@@ -58,7 +77,7 @@ func cmdCascade(args []string) int {
 
 	// Pass 1 — qwen (worker) leg.
 	fmt.Fprintln(os.Stderr, "cascade: pass 1 — running on qwen (worker leg, free)…")
-	if code := launchLeg("worker", cfg, args); code != 0 {
+	if code := launchLeg("worker", port, args); code != 0 {
 		fmt.Fprintf(os.Stderr, "cascade: pass 1 command exited %d\n", code)
 	}
 
@@ -85,7 +104,7 @@ func cmdCascade(args []string) int {
 
 	// Pass 2 — Claude (main) leg, verbatim + OAuth.
 	fmt.Fprintln(os.Stderr, "cascade: pass 2 — running on Claude (main leg, paid)…")
-	code := launchLeg("main", cfg, args)
+	code := launchLeg("main", port, args)
 	if code != 0 {
 		fmt.Fprintf(os.Stderr, "cascade: pass 2 command exited %d\n", code)
 	}
@@ -102,11 +121,12 @@ func cmdCascade(args []string) int {
 	}
 }
 
-// launchLeg runs args with ANTHROPIC_BASE_URL pointed at the proxy on the given
-// leg ("worker" | "main"), carrying the per-project /p/<id> identity when the cwd
-// is a registered project (so a global daemon loads this project's config).
-func launchLeg(leg string, cfg config.Config, args []string) int {
-	base := "http://127.0.0.1:" + cfg.Port + "/r/" + leg + projectSuffix()
+// launchLeg runs args with ANTHROPIC_BASE_URL pointed at the cascade's private
+// proxy (port) on the given leg ("worker" | "main"), carrying the per-project
+// /p/<id> identity when the cwd is a registered project so the proxy loads this
+// project's config.
+func launchLeg(leg, port string, args []string) int {
+	base := "http://127.0.0.1:" + port + "/r/" + leg + projectSuffix()
 
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
@@ -119,6 +139,19 @@ func launchLeg(leg string, cfg config.Config, args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// freePort asks the OS for an unused TCP port and returns it as a string. There is
+// a small window between closing the probe listener and the child binding it, but
+// collisions are vanishingly rare for a short-lived private proxy.
+func freePort() (string, error) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", err
+	}
+	defer l.Close()
+	_, port, err := net.SplitHostPort(l.Addr().String())
+	return port, err
 }
 
 // projectSuffix returns "/p/<id>" when the cwd is a registered project, else "".

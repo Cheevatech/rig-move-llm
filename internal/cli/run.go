@@ -104,12 +104,15 @@ func portOpen(addr string) bool {
 	return true
 }
 
-func waitPort(addr string, d time.Duration) {
+// waitPort blocks until addr accepts a connection or the deadline passes,
+// reporting whether the port came up.
+func waitPort(addr string, d time.Duration) bool {
 	deadline := time.Now().Add(d)
 	for time.Now().Before(deadline) {
 		if portOpen(addr) {
-			return
+			return true
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
+	return false
 }

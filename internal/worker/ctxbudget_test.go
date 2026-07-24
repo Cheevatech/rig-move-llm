@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Cheevatech/rig-move-llm/internal/config"
 	"github.com/Cheevatech/rig-move-llm/pkg/translate"
@@ -40,6 +41,42 @@ func TestCtxLimitEnv(t *testing.T) {
 	t.Setenv("RIG_WORKER_CTX_LIMIT", "12345")
 	if got := ctxLimit(); got != 12345 {
 		t.Fatalf("env ctxLimit=%d want 12345", got)
+	}
+}
+
+// TestExploreCtxLimit: explore has its own, tighter default budget; it honors
+// RIG_EXPLORE_CTX_LIMIT but never exceeds the global worker ctx limit.
+func TestExploreCtxLimit(t *testing.T) {
+	if got := exploreCtxLimit(); got != defaultExploreCtxLimit {
+		t.Fatalf("default exploreCtxLimit=%d want %d", got, defaultExploreCtxLimit)
+	}
+	if defaultExploreCtxLimit >= defaultCtxLimit {
+		t.Fatalf("explore budget (%d) must be tighter than the implement budget (%d)", defaultExploreCtxLimit, defaultCtxLimit)
+	}
+	t.Setenv("RIG_EXPLORE_CTX_LIMIT", "9000")
+	if got := exploreCtxLimit(); got != 9000 {
+		t.Fatalf("env exploreCtxLimit=%d want 9000", got)
+	}
+	// A tighter global caps explore too, even when explore asks for more.
+	t.Setenv("RIG_EXPLORE_CTX_LIMIT", "40000")
+	t.Setenv("RIG_WORKER_CTX_LIMIT", "8000")
+	if got := exploreCtxLimit(); got != 8000 {
+		t.Fatalf("explore budget must be capped by the global limit, got %d want 8000", got)
+	}
+}
+
+// TestExploreTimeoutDefault: explore's own call deadline is much tighter than the
+// implement runTimeout so triage+implement still fit in the caller's turn budget.
+func TestExploreTimeoutDefault(t *testing.T) {
+	if got := exploreTimeout(); got != 600*time.Second {
+		t.Fatalf("default exploreTimeout=%v want 600s", got)
+	}
+	if exploreTimeout() >= runTimeout() {
+		t.Fatalf("explore timeout (%v) must be tighter than run timeout (%v)", exploreTimeout(), runTimeout())
+	}
+	t.Setenv("RIG_EXPLORE_TIMEOUT", "120")
+	if got := exploreTimeout(); got != 120*time.Second {
+		t.Fatalf("env exploreTimeout=%v want 120s", got)
 	}
 }
 

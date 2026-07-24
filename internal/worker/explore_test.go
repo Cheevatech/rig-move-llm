@@ -144,6 +144,39 @@ func TestExploreCeilingReturnsBestEffort(t *testing.T) {
 	}
 }
 
+// TestExploreDeadlineReturnsBestEffort: when the explore call's context is already
+// past its deadline, the round loop must NOT touch the worker or hang — it returns
+// a best-effort, coverage-incomplete report so triage forces delegate and the rest
+// of the caller's turn budget survives for implement.
+func TestExploreDeadlineReturnsBestEffort(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("RIG_STATE_DIR", dir)
+	repo := exploreRepo(t)
+	// A backend that fails the test if ever called: an expired deadline must short
+	// -circuit before the first chat.
+	srv := fakeBackend(t, nil)
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already done: ctx.Err() != nil on the very first round check
+
+	e := NewEngine(config.Config{WorkerAPIBase: srv.URL})
+	res := e.Explore(ctx, repo, exploreTask)
+
+	if res.Stopped != "max_rounds" || !res.CoverageIncomplete {
+		t.Fatalf("an expired deadline must yield a best-effort incomplete report, got %+v", res)
+	}
+	if res.Iterations != 0 {
+		t.Fatalf("no worker turn should run past the deadline, iterations=%d", res.Iterations)
+	}
+	// Triage reads this digest: it must be flagged incomplete so a premature solo
+	// is overridden to delegate.
+	ev, fresh := gatestate.ReadExplore(dir)
+	if !fresh || !ev.CoverageIncomplete {
+		t.Fatalf("digest must mark coverage incomplete on deadline: %+v fresh=%v", ev, fresh)
+	}
+}
+
 func TestExploreLoopsInternallyAcrossRounds(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("RIG_STATE_DIR", dir)

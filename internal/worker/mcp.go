@@ -24,6 +24,18 @@ func runTimeout() time.Duration {
 	return time.Duration(envInt("RIG_WORKER_RUN_TIMEOUT", 3600)) * time.Second
 }
 
+// exploreTimeout bounds a single explore call. It is MUCH tighter than
+// runTimeout because explore is only Stage 0: it must leave the rest of the
+// caller's turn budget for triage + implement + verify. Measured failure mode:
+// with explore free to run its full runTimeout (3600s) it consumed the entire
+// 1800s harness watchdog on a real sympy repo, so the pipeline never reached
+// implement. On expiry the explore loop finalizes a best-effort, coverage-
+// incomplete report (triage then correctly forces delegate) rather than losing
+// the run. Override via RIG_EXPLORE_TIMEOUT (seconds).
+func exploreTimeout() time.Duration {
+	return time.Duration(envInt("RIG_EXPLORE_TIMEOUT", 600)) * time.Second
+}
+
 // rpcRequest / rpcResponse are the minimal JSON-RPC 2.0 shapes we handle. id is
 // json.RawMessage because JSON-RPC allows string OR number ids, and notifications
 // omit it (nil).
@@ -219,7 +231,7 @@ func (s *Server) onExplore(arguments json.RawMessage) map[string]any {
 	if args.Repo == "" {
 		args.Repo, _ = os.Getwd()
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), runTimeout())
+	ctx, cancel := context.WithTimeout(context.Background(), exploreTimeout())
 	defer cancel()
 	logStderr("worker.explore repo=%s", args.Repo)
 	res := s.engine.Explore(ctx, args.Repo, args.Task)

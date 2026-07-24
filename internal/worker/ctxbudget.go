@@ -25,6 +25,27 @@ const defaultCtxLimit = 48000
 // the watcher, leaving only the iteration cap as the safety net.
 func ctxLimit() int { return envInt("RIG_WORKER_CTX_LIMIT", defaultCtxLimit) }
 
+// defaultExploreCtxLimit is a TIGHTER budget for the explore read loop than the
+// implement loop's 48k. Explore is a read-only fan-out — it accumulates file
+// contents fast — and its per-turn prompt is what the worker must PREFILL every
+// iteration. On a mid-size local model a 48k prompt prefilled 26× is what made a
+// real-repo explore take ~30 min (measured: 799k cumulative prompt tokens). A
+// smaller ceiling makes each turn cheaper and checkpoints partial evidence more
+// often, so a time-bounded explore still hands back something useful. Raise it
+// for fast/cloud endpoints via RIG_EXPLORE_CTX_LIMIT.
+const defaultExploreCtxLimit = 16000
+
+// exploreCtxLimit is the explore loop's own context budget. It never exceeds the
+// global ctxLimit (an operator who tightens RIG_WORKER_CTX_LIMIT tightens explore
+// too), and defaults below it.
+func exploreCtxLimit() int {
+	lim := envInt("RIG_EXPLORE_CTX_LIMIT", defaultExploreCtxLimit)
+	if g := ctxLimit(); g > 0 && lim > g {
+		lim = g
+	}
+	return lim
+}
+
 // overCtxBudget reports whether promptTokens (the real context size the endpoint
 // saw last turn) has reached the budget. This is the one predicate both legs use
 // to decide when to checkpoint.

@@ -251,7 +251,7 @@ func (e *Engine) exploreRound(ctx context.Context, absRepo, task string, anchorL
 	bounces := 0
 	checkpointed := false
 	callIters := envInt("RIG_EXPLORE_MAX_ITERS", roundIters)
-	limit := ctxLimit()
+	limit := exploreCtxLimit()
 
 	for i := 0; i < callIters; i++ {
 		iters = i + 1

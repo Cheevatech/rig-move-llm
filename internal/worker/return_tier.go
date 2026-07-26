@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -12,8 +13,11 @@ import (
 // target repo's git working tree, so a pointer is lossless in the only sense
 // that matters here — MAIN can drill back to the bytes through it (R4 §3, R9 §3).
 type Pointer struct {
-	File      string `json:"file"`
-	Line      int    `json:"line"` // first changed line, post-change numbering
+	File string `json:"file"`
+	Line int    `json:"line"` // first changed line, post-change numbering
+	// EndLine is the last changed line of the same symbol, so a pointer names a
+	// range the drill tool can fetch, not just a starting point.
+	EndLine   int    `json:"end_line"`
 	Symbol    string `json:"symbol,omitempty"`
 	Signature string `json:"signature,omitempty"`
 	Kind      string `json:"kind"` // add | mod | del
@@ -38,7 +42,7 @@ func Pointers(repo, diff string) []Pointer {
 
 	for _, f := range parseDiffFiles(diff) {
 		if f.deleted {
-			out = append(out, Pointer{File: f.path, Line: 1, Kind: "del", Removed: f.removed})
+			out = append(out, Pointer{File: f.path, Line: 1, EndLine: 1, Kind: "del", Removed: f.removed})
 			continue
 		}
 		lines := src.get(f.path)
@@ -65,6 +69,9 @@ func Pointers(repo, diff string) []Pointer {
 			if ch.line < g.Line || g.Line == 0 {
 				g.Line = ch.line
 			}
+			if ch.line > g.EndLine {
+				g.EndLine = ch.line
+			}
 			if ch.added {
 				g.Added++
 			} else {
@@ -84,6 +91,375 @@ func Pointers(repo, diff string) []Pointer {
 		}
 	}
 	return out
+}
+
+// --- the threshold gate + manifest (R9 §1,2,3,7) --------------------------
+
+// defaultReturnThreshold is the diff size, in estimated tokens, at which the
+// return path stops shipping the diff body to MAIN and ships the manifest
+// instead. R7 measured the cost of *not* gating: a verbose return re-cached on
+// every later MAIN turn made sympy 42% MORE expensive than solving it solo, while
+// small returns (flask, pytest) came out 30-39% cheaper. So the gate wants to sit
+// above an ordinary small fix — a few hundred tokens of diff — and below the
+// multi-file returns that caused the regression. 2000 tokens (~8KB of diff) is
+// that seam; B6 tunes it against the real streams.
+const defaultReturnThreshold = 2000
+
+// returnThreshold resolves the gate's budget (RIG_RETURN_THRESHOLD), in the same
+// mould as RIG_WORKER_CTX_LIMIT.
+func returnThreshold() int { return envInt("RIG_RETURN_THRESHOLD", defaultReturnThreshold) }
+
+// noIntent reports whether worker prose is suppressed entirely
+// (RIG_RETURN_NO_INTENT=1), leaving the return artifact deterministic: pointers
+// and verify facts only. R11 wants this lockable at the source.
+func noIntent() bool { return envInt("RIG_RETURN_NO_INTENT", 0) > 0 }
+
+// Hard ceilings on everything the worker authors. Prose is a claim to be checked
+// by drilling, so it is budgeted like a caption, not a report.
+const (
+	maxIntentBytes       = 400
+	maxSymbolIntentBytes = 160
+	maxVerifyLineBytes   = 240
+	maxVerifyFailures    = 5
+	maxVerifyAssertions  = 3
+	intentTruncMark      = "…"
+)
+
+// drillTool is the one primitive on the MCP surface that returns a body, scoped
+// to a pointer (R9 §4). The manifest names it with the exact arguments it takes,
+// so the way back to the raw bytes travels with the summary. Contract shared with
+// B4: {file, start_line, end_line, kind?} where kind is "diff" or "test_log".
+const drillTool = "show_change"
+
+// testLogName is where the raw test log is parked so the drill tool can serve it
+// from the same {file, start_line, end_line} contract as a code hunk. It lives in
+// the project dir rig already owns inside a checkout, and is untracked, so it
+// never shows up in the diff it describes.
+const testLogName = ".rig-move-llm/last_test.log"
+
+// DrillRef is a ready-to-call drill invocation. Its presence is what makes a
+// tiered return lossless in the only sense R9 claims: the raw substrate is still
+// reachable, it just isn't resident.
+type DrillRef struct {
+	Tool      string `json:"tool"`
+	File      string `json:"file"`
+	StartLine int    `json:"start_line"`
+	EndLine   int    `json:"end_line"`
+	Kind      string `json:"kind"` // diff | test_log
+}
+
+// Change is one manifest entry: the deterministic pointer plus the worker's claim
+// about it (optional, capped, suppressible). Its own file/line/end_line ARE the
+// drill arguments — see drillGuidance — so the entry pays nothing to repeat them.
+type Change struct {
+	Pointer
+	Intent string `json:"intent,omitempty"`
+	// Symbols counts the symbols folded into a file-granularity entry (see
+	// TieredResult.Granularity); zero at symbol granularity.
+	Symbols int `json:"symbols,omitempty"`
+}
+
+// VerifyTier is the test result at summary resolution. The raw log is the third
+// bloat source R9 §7 names — pytest output runs to tens of thousands of tokens,
+// and Result.LastTest carries it uncapped — so it is tiered at BOTH tiers, not
+// just when the diff trips the gate.
+type VerifyTier struct {
+	Status     string    `json:"status"` // pass | fail | missing
+	Summary    string    `json:"summary"`
+	Failures   []string  `json:"failures,omitempty"`
+	Assertions []string  `json:"assertions,omitempty"`
+	LogBytes   int       `json:"log_bytes,omitempty"`
+	Drill      *DrillRef `json:"drill,omitempty"`
+}
+
+// TieredResult is what the implement tool serializes back to MAIN. It sits on top
+// of Result rather than replacing it — Result stays the worker loop's own shape
+// (B5 swaps the loop underneath it).
+type TieredResult struct {
+	Tier            string   `json:"tier"` // full | manifest
+	Summary         string   `json:"summary,omitempty"`
+	FilesChanged    []string `json:"files_changed,omitempty"`
+	Diff            string   `json:"diff,omitempty"` // tier=full only
+	DiffTokens      int      `json:"diff_tokens"`
+	ThresholdTokens int      `json:"threshold_tokens"`
+	Changes         []Change `json:"changes,omitempty"` // tier=manifest only
+	// Granularity says what one entry in Changes stands for: "symbol" normally,
+	// "file" when per-symbol entries cost more than the diff they replace.
+	Granularity     string      `json:"granularity,omitempty"`
+	Verify          *VerifyTier `json:"verify,omitempty"`
+	DrillWith       string      `json:"drill_with,omitempty"`
+	Iterations      int         `json:"iterations"`
+	InputTokens     int         `json:"input_tokens"`
+	OutputTokens    int         `json:"output_tokens"`
+	Stopped         string      `json:"stopped"`
+	HitIterationCap bool        `json:"hit_iteration_cap,omitempty"`
+	Checkpoints     int         `json:"checkpoints,omitempty"`
+	Err             string      `json:"error,omitempty"`
+}
+
+// drillGuidance tells MAIN what the manifest is and what to do with it: review
+// from the pointers, drill the ones that look wrong. It is deliberately blunt
+// about the intent lines being claims (R9 §3 / R3: a worker's account of its own
+// work is a hypothesis, and trust comes from the gate, not from the prose).
+const drillGuidance = "The diff exceeded the return budget, so it was left in the repo's git working tree and " +
+	"summarized as pointers. Each `intent` is the worker's UNVERIFIED claim about its own change. Review from " +
+	"the pointers, then read the raw hunk behind any change that looks wrong, surprising, or unexplained by " +
+	"calling `" + drillTool + "` with {file, start_line: <that change's `line`>, end_line: <its `end_line`>, " +
+	"kind: \"diff\"}. The full test output comes back the same way, from the `drill` arguments under `verify` " +
+	"(kind: \"test_log\")."
+
+// TierResult applies the return contract to one implement run: a deterministic
+// size gate on the diff (R9 §2), a pointer manifest when it trips (R9 §3), and
+// verify tiering always (R9 §7).
+//
+// The gate lives here, on the rig side of the MCP boundary, for two reasons R9
+// insists on: the worker never learns the threshold so it cannot shape its diff
+// to game it, and MAIN never has to see the diff in order to decide whether to
+// see the diff.
+func TierResult(res Result, repo string, thresholdTokens int) TieredResult {
+	out := TieredResult{
+		Summary:         intentLine(res.Summary),
+		FilesChanged:    res.FilesChanged,
+		DiffTokens:      estimateTokens(res.Diff),
+		ThresholdTokens: thresholdTokens,
+		Iterations:      res.Iterations,
+		InputTokens:     res.InputTokens,
+		OutputTokens:    res.OutputTokens,
+		Stopped:         res.Stopped,
+		HitIterationCap: res.HitIterationCap,
+		Checkpoints:     res.Checkpoints,
+		Err:             res.Err,
+	}
+	out.Verify = tierVerify(res.LastTest, repo)
+
+	if thresholdTokens <= 0 || out.DiffTokens < thresholdTokens {
+		out.Tier = "full"
+		out.Diff = res.Diff
+		return out
+	}
+
+	out.Tier = "manifest"
+	intents := symbolIntents(res.Summary)
+	for _, p := range Pointers(repo, res.Diff) {
+		if p.EndLine < p.Line {
+			p.EndLine = p.Line
+		}
+		c := Change{Pointer: p}
+		// A per-symbol claim is adopted only for a symbol the deterministic layer
+		// actually found: the worker can caption its changes, not invent them.
+		if p.Symbol != "" {
+			if s, ok := intents[p.Symbol]; ok {
+				c.Intent = capBytes(s, maxSymbolIntentBytes)
+			}
+		}
+		out.Changes = append(out.Changes, c)
+	}
+	out.Granularity = "symbol"
+
+	// A manifest is only worth building if it is smaller than the diff it stands
+	// in for, and a WIDE change breaks that: 128 one-line edits across 16 files
+	// produce more pointer entries than diff (measured on a generated fixture).
+	// Collapse to one entry per file rather than dropping entries — coverage is
+	// what keeps review honest (invariant R1: every change stays drillable), so
+	// the thing to give up under budget pressure is resolution, not reach. The
+	// bar is a real squeeze, not merely "smaller": a manifest that costs half the
+	// diff has not bought enough to be worth reviewing blind.
+	if estimateTokens(manifestJSON(out.Changes))*2 >= out.DiffTokens {
+		out.Changes = rollupByFile(out.Changes)
+		out.Granularity = "file"
+	}
+	out.DrillWith = drillGuidance
+	return out
+}
+
+// manifestJSON renders the manifest the way it will be billed, so the size guard
+// measures the real cost and not an estimate of an estimate.
+func manifestJSON(changes []Change) string {
+	b, err := json.MarshalIndent(changes, "", "  ")
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// rollupByFile folds every symbol pointer of a file into one file-wide pointer:
+// the union of the changed line range, the summed counts, and how many symbols it
+// covers. Intent lines are dropped — a claim that no longer names one symbol is
+// not a claim worth billing.
+func rollupByFile(changes []Change) []Change {
+	var order []string
+	byFile := map[string]*Change{}
+	for _, c := range changes {
+		f := byFile[c.File]
+		if f == nil {
+			roll := Change{Pointer: Pointer{File: c.File, Line: c.Line, EndLine: c.EndLine, Kind: c.Kind}}
+			byFile[c.File] = &roll
+			order = append(order, c.File)
+			f = &roll
+		}
+		if c.Line < f.Line {
+			f.Line = c.Line
+		}
+		if c.EndLine > f.EndLine {
+			f.EndLine = c.EndLine
+		}
+		if c.Kind != f.Kind {
+			f.Kind = "mod" // a file with mixed add/mod/del edits is simply modified
+		}
+		f.Added += c.Added
+		f.Removed += c.Removed
+		if c.Symbol != "" {
+			f.Symbols++
+		}
+	}
+	out := make([]Change, 0, len(order))
+	for _, f := range order {
+		out = append(out, *byFile[f])
+	}
+	return out
+}
+
+// estimateTokens is a free, monotonic stand-in for a tokenizer (this binary ships
+// with none, and pulling one in for a size gate would cost more than it saves).
+// Four bytes per token is the usual rule of thumb for code; the gate only needs
+// the ordering to be right, not the count.
+func estimateTokens(s string) int { return (len(s) + 3) / 4 }
+
+// intentLine caps the worker's own account of the run, and drops it entirely when
+// prose is locked off.
+func intentLine(summary string) string {
+	if noIntent() {
+		return ""
+	}
+	s := summary
+	// Strip a machine-readable intents block so it is not billed twice (it is
+	// re-emitted per symbol in the manifest).
+	if raw := extractJSON(s); raw != "" && strings.Contains(raw, "\"intents\"") {
+		s = strings.Replace(s, raw, "", 1)
+	}
+	return capBytes(strings.TrimSpace(s), maxIntentBytes)
+}
+
+// symbolIntents pulls an optional {"intents": {"Symbol": "one line"}} block out of
+// the worker's reply, reusing the same tolerant extractor the explore report gate
+// uses. Workers that emit no such block simply get no per-symbol captions.
+func symbolIntents(summary string) map[string]string {
+	if noIntent() {
+		return nil
+	}
+	raw := extractJSON(summary)
+	if raw == "" {
+		return nil
+	}
+	var envelope struct {
+		Intents map[string]string `json:"intents"`
+	}
+	if err := json.Unmarshal([]byte(raw), &envelope); err != nil {
+		return nil
+	}
+	return envelope.Intents
+}
+
+// tierVerify reduces a raw test log to what review acts on, and parks the log so
+// the rest stays fetchable. Green is one line; red keeps the failing test ids and
+// the assertion text, which is what tells MAIN whether the fix is real.
+func tierVerify(log, repo string) *VerifyTier {
+	if strings.TrimSpace(log) == "" {
+		return &VerifyTier{
+			Status:  "missing",
+			Summary: "no test command was run by the worker — nothing verifies this change",
+		}
+	}
+	v := &VerifyTier{Status: exitStatus(log), LogBytes: len(log)}
+	lines := strings.Split(log, "\n")
+
+	for _, l := range lines {
+		t := strings.TrimSpace(l)
+		switch {
+		case strings.HasPrefix(t, "FAILED "), strings.HasPrefix(t, "ERROR "):
+			if len(v.Failures) < maxVerifyFailures {
+				v.Failures = append(v.Failures, capBytes(t, maxVerifyLineBytes))
+			}
+		case t == "E" || strings.HasPrefix(t, "E "), strings.HasPrefix(t, "E\t"):
+			if len(v.Assertions) < maxVerifyAssertions {
+				v.Assertions = append(v.Assertions, capBytes(strings.TrimSpace(t[1:]), maxVerifyLineBytes))
+			}
+		}
+	}
+	v.Summary = verifySummaryLine(lines, v.Status)
+
+	// The raw log is not in git, so parking it is what lets one drill contract
+	// serve both a code hunk and the log behind a verify summary.
+	if rel, n, err := parkTestLog(repo, log); err == nil {
+		v.Drill = &DrillRef{Tool: drillTool, File: rel, StartLine: 1, EndLine: n, Kind: "test_log"}
+	}
+	return v
+}
+
+// exitStatus reads the run_bash exit trailer, which is rig's own marker and so is
+// more trustworthy than pattern-matching a test runner's output.
+func exitStatus(log string) string {
+	i := strings.LastIndex(log, "[exit ")
+	killed := strings.Contains(log, "[killed:") || strings.Contains(log, "[run error:")
+	switch {
+	case killed:
+		return "fail"
+	case i < 0:
+		return "unknown"
+	case strings.HasPrefix(log[i:], "[exit 0]"):
+		return "pass"
+	default:
+		return "fail"
+	}
+}
+
+// verifySummaryLine picks the runner's own tally line — pytest's "N passed" /
+// "N failed" banner — falling back to the last non-empty line. Banner padding
+// ('=' rules) is stripped so the line costs what it says.
+func verifySummaryLine(lines []string, status string) string {
+	want := "passed"
+	if status != "pass" {
+		want = "failed"
+	}
+	var last string
+	pick := ""
+	for _, l := range lines {
+		t := strings.Trim(strings.TrimSpace(l), "= ")
+		if t == "" || strings.HasPrefix(t, "[exit") {
+			continue
+		}
+		last = t
+		if strings.Contains(t, want) && (strings.Contains(t, " in ") || strings.Contains(t, "passed")) {
+			pick = t // later tallies win: the final banner is the authoritative one
+		}
+	}
+	if pick == "" {
+		pick = last
+	}
+	return capBytes(pick, maxVerifyLineBytes)
+}
+
+// parkTestLog writes the raw log inside repo and returns its repo-relative path
+// plus its line count, which are exactly the drill arguments for it.
+func parkTestLog(repo, log string) (string, int, error) {
+	abs, err := safeJoin(repo, testLogName)
+	if err != nil {
+		return "", 0, err
+	}
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		return "", 0, err
+	}
+	if err := os.WriteFile(abs, []byte(log), 0o644); err != nil {
+		return "", 0, err
+	}
+	return testLogName, strings.Count(log, "\n") + 1, nil
+}
+
+func capBytes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + intentTruncMark
 }
 
 // --- unified diff parsing -------------------------------------------------

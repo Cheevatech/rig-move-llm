@@ -131,7 +131,7 @@ func (s *Server) onInitialize(params json.RawMessage) map[string]any {
 }
 
 // toolList is the tools/list payload: implement (Stage 2), explore (Stage 0),
-// and triage (the Gate A intake declaration).
+// triage (the Gate A intake declaration), and show_change (the drill).
 func toolList() []map[string]any {
 	return []map[string]any{{
 		"name":        "implement",
@@ -167,6 +167,20 @@ func toolList() []map[string]any {
 			},
 			"required": []string{"decision", "reason"},
 		},
+	}, {
+		"name": "show_change",
+		"description": "Show the raw bytes behind one entry of a tiered return: the actual git diff hunks covering a line range, or the full test log. When implement returns a manifest of changes instead of the diff itself, this is how you review one — call it with that entry's `file`, `line` and `end_line`. It returns git's own output verbatim, so read it as you would the diff. Prefer this over reading the changed file directly: the file shows the post-change state only, this shows what actually changed.",
+		"inputSchema": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"file":       map[string]any{"type": "string", "description": "Repo-relative path from the manifest entry."},
+				"start_line": map[string]any{"type": "integer", "description": "First line of the range, post-change numbering (a manifest entry's `line`)."},
+				"end_line":   map[string]any{"type": "integer", "description": "Last line of the range (a manifest entry's `end_line`). Defaults to start_line."},
+				"kind":       map[string]any{"type": "string", "enum": []string{"diff", "test_log"}, "description": "\"diff\" (default) drills the working-tree change; \"test_log\" drills the parked raw test output."},
+				"repo":       map[string]any{"type": "string", "description": "Absolute path to the repo checkout. Defaults to the server's working directory."},
+			},
+			"required": []string{"file", "start_line"},
+		},
 	}}
 }
 
@@ -185,6 +199,8 @@ func (s *Server) onToolsCall(params json.RawMessage) (map[string]any, *rpcError)
 		return s.onExplore(call.Arguments), nil
 	case "triage":
 		return s.onTriage(call.Arguments), nil
+	case "show_change":
+		return s.onShowChange(call.Arguments), nil
 	default:
 		return nil, &rpcError{Code: -32602, Message: "unknown tool: " + call.Name}
 	}
@@ -253,6 +269,55 @@ func (s *Server) onTriage(arguments json.RawMessage) map[string]any {
 	body, _ := json.MarshalIndent(out, "", "  ")
 	logStderr("worker.triage declared=%s effective=%s overridden=%v", out.Declared, out.Effective, out.Overridden)
 	return toolText(string(body), false)
+}
+
+// drillTimeout bounds one show_change. It only shells out to `git diff` on one
+// path, so it is short by design: a drill that hangs stalls a review turn.
+func drillTimeout() time.Duration {
+	return time.Duration(envInt("RIG_DRILL_TIMEOUT", 30)) * time.Second
+}
+
+// onShowChange serves the drill (R9 §4). The body is returned as plain text
+// rather than wrapped in JSON: it is a diff, MAIN reads diffs natively, and JSON
+// escaping would both obscure it and inflate the very cost the tier exists to
+// cut. The bookkeeping rides on one header line instead.
+func (s *Server) onShowChange(arguments json.RawMessage) map[string]any {
+	var args struct {
+		File      string `json:"file"`
+		StartLine int    `json:"start_line"`
+		EndLine   int    `json:"end_line"`
+		Kind      string `json:"kind"`
+		Repo      string `json:"repo"`
+	}
+	_ = json.Unmarshal(arguments, &args)
+	if strings.TrimSpace(args.File) == "" {
+		return toolText("show_change: file is required", true)
+	}
+	if args.Repo == "" {
+		args.Repo, _ = os.Getwd()
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), drillTimeout())
+	defer cancel()
+	res, err := ShowChange(ctx, args.Repo, args.File, args.StartLine, args.EndLine, args.Kind)
+	if err != nil {
+		logStderr("worker.show_change refused file=%s: %v", args.File, err)
+		return toolText("show_change: "+err.Error(), true)
+	}
+
+	calls, total := DrilledSoFar()
+	logStderr("worker.show_change file=%s:%d-%d kind=%s hunks=%d bytes=%d drilled_total=%d/%d",
+		res.File, res.StartLine, res.EndLine, res.Kind, res.Hunks, len(res.Body), calls, total)
+
+	if res.Body == "" {
+		return toolText(fmt.Sprintf("%s:%d-%d (%s) — nothing there: the working tree has no change covering that range.",
+			res.File, res.StartLine, res.EndLine, res.Kind), false)
+	}
+	head := fmt.Sprintf("%s:%d-%d (%s, %d B", res.File, res.StartLine, res.EndLine, res.Kind, len(res.Body))
+	if res.Kind == drillKindDiff {
+		head += fmt.Sprintf(", %d hunk(s), whole — hunks are never clipped at the range", res.Hunks)
+	}
+	return toolText(head+")\n"+res.Body, false)
 }
 
 // toolText wraps a text payload in the MCP tools/call result envelope.

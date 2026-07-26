@@ -212,9 +212,16 @@ func (s *Server) onToolsCall(params json.RawMessage) (map[string]any, *rpcError)
 	logStderr("worker.implement repo=%s gate=%s", args.Repo, args.GateDir)
 	res := s.engine.Implement(ctx, args.Repo, args.Task, args.GateDir)
 
-	body, _ := json.MarshalIndent(res, "", "  ")
-	logStderr("worker.implement done stopped=%s iters=%d in=%d out=%d files=%v",
-		res.Stopped, res.Iterations, res.InputTokens, res.OutputTokens, res.FilesChanged)
+	// The return contract (R9): the diff and the test log are the two things that
+	// get re-cached on every later MAIN turn, so they are tiered here — on the rig
+	// side of the boundary — before anything is serialized. The worker never sees
+	// the threshold (it cannot shape its diff to beat it) and MAIN never has to
+	// read the diff in order to decide whether to read the diff.
+	payload := TierResult(res, args.Repo, returnThreshold())
+	body, _ := json.MarshalIndent(payload, "", "  ")
+	logStderr("worker.implement done stopped=%s iters=%d in=%d out=%d files=%v tier=%s diff_tokens=%d",
+		res.Stopped, res.Iterations, res.InputTokens, res.OutputTokens, res.FilesChanged,
+		payload.Tier, payload.DiffTokens)
 	return toolText(string(body), res.Stopped == "error"), nil
 }
 

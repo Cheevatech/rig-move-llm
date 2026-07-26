@@ -26,13 +26,13 @@ func TestPointersOnRealDiff(t *testing.T) {
 	got := Pointers(repo, diff)
 
 	want := []Pointer{
-		{File: "helpers.py", Line: 1, Symbol: "simplify", Signature: "def simplify(expr):", Kind: "add", Added: 2},
-		{File: "point.py", Line: 5, Symbol: "", Signature: "", Kind: "mod", Added: 1, Removed: 1},
-		{File: "point.py", Line: 27, Symbol: "Point.__mul__", Signature: "def __mul__(self, factor):", Kind: "mod", Added: 2, Removed: 2},
-		{File: "point.py", Line: 36, Symbol: "Point._normalize.pad", Signature: "def pad(seq, n):", Kind: "mod", Added: 2},
-		{File: "point.py", Line: 48, Symbol: "Point2D.scale", Signature: "def scale(self, factor):", Kind: "add", Added: 3},
-		{File: "point.py", Line: 53, Symbol: "load_points", Signature: "async def load_points(path):", Kind: "mod", Added: 1},
-		{File: "point.py", Line: 59, Symbol: "top_level", Signature: "def top_level():", Kind: "mod", Added: 1, Removed: 2},
+		{File: "helpers.py", Line: 1, EndLine: 2, Symbol: "simplify", Signature: "def simplify(expr):", Kind: "add", Added: 2},
+		{File: "point.py", Line: 5, EndLine: 5, Symbol: "", Signature: "", Kind: "mod", Added: 1, Removed: 1},
+		{File: "point.py", Line: 27, EndLine: 28, Symbol: "Point.__mul__", Signature: "def __mul__(self, factor):", Kind: "mod", Added: 2, Removed: 2},
+		{File: "point.py", Line: 36, EndLine: 37, Symbol: "Point._normalize.pad", Signature: "def pad(seq, n):", Kind: "mod", Added: 2},
+		{File: "point.py", Line: 48, EndLine: 50, Symbol: "Point2D.scale", Signature: "def scale(self, factor):", Kind: "add", Added: 3},
+		{File: "point.py", Line: 53, EndLine: 53, Symbol: "load_points", Signature: "async def load_points(path):", Kind: "mod", Added: 1},
+		{File: "point.py", Line: 59, EndLine: 59, Symbol: "top_level", Signature: "def top_level():", Kind: "mod", Added: 1, Removed: 2},
 	}
 
 	if len(got) != len(want) {
@@ -88,7 +88,7 @@ index 111..222 100644
 	if got[0].Symbol != "" || got[0].Signature != "" {
 		t.Errorf("non-Python file should yield a bare pointer, got %+v", got[0])
 	}
-	if got[0].File != "README.md" || got[0].Line != 2 || got[0].Kind != "mod" {
+	if got[0].File != "README.md" || got[0].Line != 2 || got[0].EndLine != 2 || got[0].Kind != "mod" {
 		t.Errorf("bare pointer wrong: %+v", got[0])
 	}
 }

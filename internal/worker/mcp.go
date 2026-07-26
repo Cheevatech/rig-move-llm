@@ -168,7 +168,7 @@ func toolList() []map[string]any {
 			"required": []string{"decision", "reason"},
 		},
 	}, {
-		"name": "show_change",
+		"name":        "show_change",
 		"description": "Show the raw bytes behind one entry of a tiered return: the actual git diff hunks covering a line range, or the full test log. When implement returns a manifest of changes instead of the diff itself, this is how you review one — call it with that entry's `file`, `line` and `end_line`. It returns git's own output verbatim, so read it as you would the diff. Prefer this over reading the changed file directly: the file shows the post-change state only, this shows what actually changed.",
 		"inputSchema": map[string]any{
 			"type": "object",

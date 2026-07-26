@@ -489,11 +489,15 @@ func TestMCPImplementReturnsTieredPayload(t *testing.T) {
 	noise := strings.Repeat("collecting … a very long pytest log line that MAIN would re-cache forever\n", 400)
 	be := fakeBackend(t, []translate.OpenAIResponse{
 		toolCallResp("c1", "write_file", `{"path":"app.py","content":"def f():\n    return 2\n"}`),
-		toolCallResp("c2", "run_bash", `{"command":"cat noise.txt; echo '1 passed in 0.1s'"}`),
+		toolCallResp("c2", "run_bash", `{"command":"sh runtests.sh"}`),
 		finalResp("Changed f() to return 2."),
 	})
 	defer be.Close()
 	if err := os.WriteFile(filepath.Join(repo, "noise.txt"), []byte(noise), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "runtests.sh"),
+		[]byte("#!/bin/sh\ncat noise.txt\necho '1 passed in 0.1s'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 

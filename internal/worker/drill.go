@@ -109,8 +109,65 @@ func ShowChange(ctx context.Context, repo, file string, startLine, endLine int, 
 		}
 	}
 
+	if res.Body == "" {
+		return nil, explainEmptyDrill(ctx, repo, file, startLine, endLine, kind)
+	}
+
 	meterDrill(len(res.Body))
 	return res, nil
+}
+
+// explainEmptyDrill turns "nothing came back" into a diagnosis. Empty is
+// ambiguous in the one way review cannot afford: the same silence covers a range
+// that holds no change and a drill sent to the wrong checkout. B6 run 2 hit the
+// second and read it as the first — a call that looks like it succeeded while
+// reporting no change where a change exists is how a tiered return goes blind
+// (invariant R1). So an empty drill is always an error, and it names which of
+// the three conditions it actually is.
+func explainEmptyDrill(ctx context.Context, repo, file string, startLine, endLine int, kind string) error {
+	if kind == drillKindTestLog {
+		return fmt.Errorf("lines %d-%d of %s are empty — the parked log is shorter than that; drill from line 1",
+			startLine, endLine, file)
+	}
+
+	changed := changedPaths(ctx, repo)
+	switch {
+	case len(changed) == 0:
+		return fmt.Errorf("%s has NO working-tree changes at all, so this is very likely the wrong checkout — "+
+			"pass the manifest's `repo` explicitly rather than relying on the default. "+
+			"Do not read this as \"the change is fine\": nothing was reviewed", repo)
+	case !containsPath(changed, file):
+		return fmt.Errorf("%s is unchanged in %s — the files that did change are: %s",
+			file, repo, strings.Join(changed, ", "))
+	default:
+		spans := hunkSpans(gitOut(ctx, repo, "diff", "-U"+strconv.Itoa(drillContext()), "--", file))
+		if len(spans) == 0 {
+			return fmt.Errorf("lines %d-%d of %s cover no hunk", startLine, endLine, file)
+		}
+		return fmt.Errorf("lines %d-%d of %s cover no hunk — the changed spans in this file are: %s",
+			startLine, endLine, file, strings.Join(spans, ", "))
+	}
+}
+
+// changedPaths lists the repo-relative paths carrying a working-tree change,
+// which is what tells an empty drill apart from a clean tree.
+func changedPaths(ctx context.Context, repo string) []string {
+	var out []string
+	for _, l := range strings.Split(gitOut(ctx, repo, "diff", "--name-only"), "\n") {
+		if p := strings.TrimSpace(l); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func containsPath(paths []string, file string) bool {
+	for _, p := range paths {
+		if p == file {
+			return true
+		}
+	}
+	return false
 }
 
 // hunkSpans lists the post-change line range of each hunk, so a refused drill

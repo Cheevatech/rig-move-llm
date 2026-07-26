@@ -76,6 +76,13 @@ func gitRepo(t *testing.T) string {
 	if err := os.WriteFile(filepath.Join(dir, "app.py"), []byte("def f():\n    return 1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// verify.sh is the fixture's gate: running it is what makes a run verified.
+	// (An inspection command like `git diff` or `grep … && echo PASS` is NOT a
+	// gate — it reports the repo's state, or the worker's own say-so.)
+	if err := os.WriteFile(filepath.Join(dir, "verify.sh"),
+		[]byte("#!/bin/sh\ngrep -q \"return $1\" app.py && echo PASS || echo FAIL\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	run("add", "-A")
 	run("commit", "-qm", "base")
 	return dir
@@ -86,7 +93,7 @@ func TestImplement_FullCycle(t *testing.T) {
 	be := fakeBackend(t, []translate.OpenAIResponse{
 		toolCallResp("c1", "read_file", `{"path":"app.py"}`),
 		toolCallResp("c2", "write_file", `{"path":"app.py","content":"def f():\n    return 2\n"}`),
-		toolCallResp("c3", "run_bash", `{"command":"grep -q 'return 2' app.py && echo PASS"}`),
+		toolCallResp("c3", "run_bash", `{"command":"sh verify.sh 2"}`),
 		finalResp("Changed f() to return 2."),
 	})
 	defer be.Close()

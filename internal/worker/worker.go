@@ -54,10 +54,14 @@ type Result struct {
 	FilesChanged []string `json:"files_changed"`
 	Diff         string   `json:"diff"`
 	LastTest     string   `json:"last_test,omitempty"`
-	Iterations   int      `json:"iterations"`
-	InputTokens  int      `json:"input_tokens"`
-	OutputTokens int      `json:"output_tokens"`
-	Stopped      string   `json:"stopped"` // "done" | "max_iters" | "error"
+	// LastTestCmd is the command LastTest came from. The gate is picked out of the
+	// worker's bash calls by a heuristic, so the pick travels with the output:
+	// review judges the command rather than trusting the classifier.
+	LastTestCmd  string `json:"last_test_cmd,omitempty"`
+	Iterations   int    `json:"iterations"`
+	InputTokens  int    `json:"input_tokens"`
+	OutputTokens int    `json:"output_tokens"`
+	Stopped      string `json:"stopped"` // "done" | "max_iters" | "error"
 	// HitIterationCap mirrors Stopped=="max_iters" as an explicit flag so MAIN's
 	// review knows the worker ran out of budget before declaring done.
 	HitIterationCap bool `json:"hit_iteration_cap,omitempty"`
@@ -188,7 +192,14 @@ func (e *Engine) Implement(ctx context.Context, repo, task, gateDir string) Resu
 			out := e.execTool(ctx, absRepo, tc)
 			switch tc.Function.Name {
 			case "run_bash":
-				res.LastTest = out
+				// Only a command that RUNS the code can verify it. Recording every
+				// bash call made LastTest whatever ran last — in live fire that was
+				// `git diff` on every delegate, so `verify` reported a pass no test
+				// had established and the return carried its own diff twice.
+				if cmd := bashCommandArg(tc); isGateCommand(cmd) {
+					res.LastTest = out
+					res.LastTestCmd = cmd
+				}
 			case "read_file":
 				if p := readPathArg(tc); p != "" {
 					read[p] = true
@@ -281,6 +292,74 @@ func readPathArg(tc translate.OpenAIToolCall) string {
 		return ""
 	}
 	return strings.TrimSpace(a.Path)
+}
+
+// bashCommandArg pulls the command out of a run_bash tool call.
+func bashCommandArg(tc translate.OpenAIToolCall) string {
+	var a struct {
+		Command string `json:"command"`
+	}
+	if json.Unmarshal([]byte(tc.Function.Arguments), &a) != nil {
+		return ""
+	}
+	return strings.TrimSpace(a.Command)
+}
+
+// inspectionCmds are the commands that only READ the repo's state. Nothing here
+// can verify a change: at best it shows what the change looks like, which is the
+// diff again, and `grep -q … && echo PASS` is a worker asserting its own success
+// in the shell. Everything else — a test runner, a script, an interpreter — runs
+// code, and running the code is what a gate is.
+var inspectionCmds = map[string]bool{
+	"git": true, "ls": true, "cat": true, "head": true, "tail": true,
+	"grep": true, "rg": true, "ag": true, "find": true, "fd": true,
+	"echo": true, "printf": true, "pwd": true, "cd": true, "wc": true,
+	"which": true, "type": true, "tree": true, "stat": true, "file": true,
+	"du": true, "df": true, "sed": true, "awk": true, "cut": true,
+	"sort": true, "uniq": true, "diff": true, "env": true, "export": true,
+	"true": true, "false": true, "touch": true, "mkdir": true, "cp": true,
+	"mv": true, "rm": true, "chmod": true, "less": true, "more": true,
+}
+
+// isGateCommand reports whether a bash command verifies the change rather than
+// inspecting it. A compound command counts if ANY of its segments runs code, so
+// `cd sympy && python -m pytest` is a gate and `git diff | head` is not.
+//
+// This is a heuristic and is allowed to be: LastTestCmd publishes the command it
+// picked, so a wrong call is visible to review instead of silently reported as a
+// verified pass.
+func isGateCommand(cmd string) bool {
+	for _, seg := range splitShellSegments(cmd) {
+		fields := strings.Fields(seg)
+		// Skip leading VAR=value assignments (`PYTHONPATH=. pytest -q`).
+		for len(fields) > 0 && strings.Contains(fields[0], "=") && !strings.ContainsAny(fields[0], "/") {
+			fields = fields[1:]
+		}
+		if len(fields) == 0 {
+			continue
+		}
+		head := fields[0]
+		if i := strings.LastIndex(head, "/"); i >= 0 {
+			head = head[i+1:]
+		}
+		if !inspectionCmds[head] {
+			return true
+		}
+	}
+	return false
+}
+
+// splitShellSegments cuts a command on the operators that chain separate
+// programs, so each segment can be judged on its own head word.
+func splitShellSegments(cmd string) []string {
+	repl := strings.NewReplacer("&&", "\x00", "||", "\x00", ";", "\x00", "|", "\x00", "\n", "\x00")
+	var out []string
+	for _, s := range strings.Split(repl.Replace(cmd), "\x00") {
+		if t := strings.TrimSpace(s); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // chat issues one non-streaming Chat Completions request with the given tool

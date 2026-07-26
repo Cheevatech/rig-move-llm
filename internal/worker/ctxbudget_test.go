@@ -130,7 +130,7 @@ func TestImplement_CtxCheckpointAccumulates(t *testing.T) {
 		// turn 3: second edit on top; budget trips -> checkpoint #3 (diff: both edits)
 		withUsage(toolCallResp("c3", "write_file", `{"path":"app.py","content":"def f():\n    return 2\n\ndef g():\n    return 3\n"}`), over),
 		// turn 4: verify; small usage -> no checkpoint
-		withUsage(toolCallResp("c4", "run_bash", `{"command":"grep -q 'return 3' app.py && echo PASS"}`), 10),
+		withUsage(toolCallResp("c4", "run_bash", `{"command":"sh verify.sh 3"}`), 10),
 		finalResp("Applied both edits."),
 	})
 	defer srv.Close()

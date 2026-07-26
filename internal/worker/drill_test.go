@@ -445,14 +445,17 @@ func TestShowChangeRefusesGatePath(t *testing.T) {
 	}
 }
 
+// An out-of-range drill returns nothing, and "nothing" is the one answer review
+// cannot act on: it reads identically to "this change is fine". So it is an
+// error that names the spans which DO carry the change (B6 run 2).
 func TestShowChangeReportsAnEmptyRange(t *testing.T) {
 	repo := drillRepo(t, "app.py", drillBase, drillAfter)
 	res, err := ShowChange(context.Background(), repo, "app.py", 900, 910, "diff")
-	if err != nil {
-		t.Fatalf("ShowChange: %v", err)
+	if err == nil {
+		t.Fatalf("an out-of-range drill must not look like a successful empty read: %+v", res)
 	}
-	if res.Body != "" || res.Hunks != 0 {
-		t.Fatalf("expected no hunks for an out-of-range drill, got %d hunk(s): %q", res.Hunks, res.Body)
+	if !strings.Contains(err.Error(), "changed spans") {
+		t.Errorf("error does not point at the real spans: %v", err)
 	}
 }
 

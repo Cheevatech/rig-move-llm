@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Cheevatech/rig-move-llm/internal/config"
@@ -62,6 +63,35 @@ type rpcResponse struct {
 type Server struct {
 	engine *Engine
 	out    *bufio.Writer
+
+	// mu guards repo. The stdio loop is sequential today, but the drill is read
+	// by a different call than the one that sets it, so the pairing is stated.
+	mu sync.Mutex
+	// repo is where implement last ran. It is the drill's default target: under
+	// the product wiring the server's own working directory is rig's checkout,
+	// not the repo under work, so defaulting to the cwd sent every unqualified
+	// drill to the wrong tree (B6 run 2).
+	repo string
+}
+
+// noteRepo records the tree the work is happening in, so a later drill that
+// arrives without a repo argument still lands on it.
+func (s *Server) noteRepo(repo string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.repo = repo
+}
+
+// drillTarget resolves the default drill target: the repo implement ran in, and
+// only failing that the process working directory.
+func (s *Server) drillTarget() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.repo != "" {
+		return s.repo
+	}
+	cwd, _ := os.Getwd()
+	return cwd
 }
 
 // Serve runs the MCP stdio loop over r/w until r is closed (EOF). It is the body
@@ -223,6 +253,8 @@ func (s *Server) onToolsCall(params json.RawMessage) (map[string]any, *rpcError)
 		}
 	}
 
+	s.noteRepo(args.Repo)
+
 	ctx, cancel := context.WithTimeout(context.Background(), runTimeout())
 	defer cancel()
 	logStderr("worker.implement repo=%s gate=%s", args.Repo, args.GateDir)
@@ -299,7 +331,7 @@ func (s *Server) onShowChange(arguments json.RawMessage) map[string]any {
 		return toolText("show_change: file is required", true)
 	}
 	if args.Repo == "" {
-		args.Repo, _ = os.Getwd()
+		args.Repo = s.drillTarget()
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), drillTimeout())
@@ -314,10 +346,6 @@ func (s *Server) onShowChange(arguments json.RawMessage) map[string]any {
 	logStderr("worker.show_change file=%s:%d-%d kind=%s hunks=%d bytes=%d drilled_total=%d/%d",
 		res.File, res.StartLine, res.EndLine, res.Kind, res.Hunks, len(res.Body), calls, total)
 
-	if res.Body == "" {
-		return toolText(fmt.Sprintf("%s:%d-%d (%s) — nothing there: the working tree has no change covering that range.",
-			res.File, res.StartLine, res.EndLine, res.Kind), false)
-	}
 	head := fmt.Sprintf("%s:%d-%d (%s, %d B", res.File, res.StartLine, res.EndLine, res.Kind, len(res.Body))
 	if res.Kind == drillKindDiff {
 		head += fmt.Sprintf(", %d hunk(s), whole — hunks are never clipped at the range", res.Hunks)

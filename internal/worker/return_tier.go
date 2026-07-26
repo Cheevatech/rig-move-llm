@@ -141,7 +141,11 @@ const testLogName = ".rig-move-llm/last_test.log"
 // tiered return lossless in the only sense R9 claims: the raw substrate is still
 // reachable, it just isn't resident.
 type DrillRef struct {
-	Tool      string `json:"tool"`
+	Tool string `json:"tool"`
+	// Repo makes the ref self-contained. The drill's default target is the repo
+	// implement ran in, but an explicit path is what keeps a review from ever
+	// depending on that default being right (B6 run 2).
+	Repo      string `json:"repo,omitempty"`
 	File      string `json:"file"`
 	StartLine int    `json:"start_line"`
 	EndLine   int    `json:"end_line"`
@@ -164,7 +168,11 @@ type Change struct {
 // and Result.LastTest carries it uncapped — so it is tiered at BOTH tiers, not
 // just when the diff trips the gate.
 type VerifyTier struct {
-	Status     string    `json:"status"` // pass | fail | missing
+	Status string `json:"status"` // pass | fail | missing
+	// Command is the gate this status came from. It is published because the
+	// classifier that picks the gate out of the worker's bash calls is a
+	// heuristic: naming the command lets review judge it instead of trust it.
+	Command    string    `json:"command,omitempty"`
 	Summary    string    `json:"summary"`
 	Failures   []string  `json:"failures,omitempty"`
 	Assertions []string  `json:"assertions,omitempty"`
@@ -176,7 +184,10 @@ type VerifyTier struct {
 // of Result rather than replacing it — Result stays the worker loop's own shape
 // (B5 swaps the loop underneath it).
 type TieredResult struct {
-	Tier            string   `json:"tier"` // full | manifest
+	Tier string `json:"tier"` // full | manifest
+	// Repo is the checkout the pointers refer to, published so every drill can
+	// be explicit about its target instead of inheriting a default.
+	Repo            string   `json:"repo,omitempty"`
 	Summary         string   `json:"summary,omitempty"`
 	FilesChanged    []string `json:"files_changed,omitempty"`
 	Diff            string   `json:"diff,omitempty"` // tier=full only
@@ -204,9 +215,10 @@ type TieredResult struct {
 const drillGuidance = "The diff exceeded the return budget, so it was left in the repo's git working tree and " +
 	"summarized as pointers. Each `intent` is the worker's UNVERIFIED claim about its own change. Review from " +
 	"the pointers, then read the raw hunk behind any change that looks wrong, surprising, or unexplained by " +
-	"calling `" + drillTool + "` with {file, start_line: <that change's `line`>, end_line: <its `end_line`>, " +
-	"kind: \"diff\"}. The full test output comes back the same way, from the `drill` arguments under `verify` " +
-	"(kind: \"test_log\")."
+	"calling `" + drillTool + "` with {repo: <this result's `repo`>, file, start_line: <that change's `line`>, " +
+	"end_line: <its `end_line`>, kind: \"diff\"}. ALWAYS pass `repo`: it is the checkout these pointers were " +
+	"taken from, and a drill against any other tree cannot see this change. The full test output comes back the " +
+	"same way, from the `drill` arguments under `verify` (kind: \"test_log\")."
 
 // TierResult applies the return contract to one implement run: a deterministic
 // size gate on the diff (R9 §2), a pointer manifest when it trips (R9 §3), and
@@ -230,7 +242,8 @@ func TierResult(res Result, repo string, thresholdTokens int) TieredResult {
 		Checkpoints:     res.Checkpoints,
 		Err:             res.Err,
 	}
-	out.Verify = tierVerify(res.LastTest, repo)
+	out.Repo = repo
+	out.Verify = tierVerify(res.LastTest, res.LastTestCmd, repo)
 
 	if thresholdTokens <= 0 || out.DiffTokens < thresholdTokens {
 		out.Tier = "full"
@@ -363,14 +376,14 @@ func symbolIntents(summary string) map[string]string {
 // tierVerify reduces a raw test log to what review acts on, and parks the log so
 // the rest stays fetchable. Green is one line; red keeps the failing test ids and
 // the assertion text, which is what tells MAIN whether the fix is real.
-func tierVerify(log, repo string) *VerifyTier {
+func tierVerify(log, cmd, repo string) *VerifyTier {
 	if strings.TrimSpace(log) == "" {
 		return &VerifyTier{
 			Status:  "missing",
 			Summary: "no test command was run by the worker — nothing verifies this change",
 		}
 	}
-	v := &VerifyTier{Status: exitStatus(log), LogBytes: len(log)}
+	v := &VerifyTier{Status: exitStatus(log), Command: cmd, LogBytes: len(log)}
 	lines := strings.Split(log, "\n")
 
 	for _, l := range lines {
@@ -391,7 +404,7 @@ func tierVerify(log, repo string) *VerifyTier {
 	// The raw log is not in git, so parking it is what lets one drill contract
 	// serve both a code hunk and the log behind a verify summary.
 	if rel, n, err := parkTestLog(repo, log); err == nil {
-		v.Drill = &DrillRef{Tool: drillTool, File: rel, StartLine: 1, EndLine: n, Kind: "test_log"}
+		v.Drill = &DrillRef{Tool: drillTool, Repo: repo, File: rel, StartLine: 1, EndLine: n, Kind: "test_log"}
 	}
 	return v
 }

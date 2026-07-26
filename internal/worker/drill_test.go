@@ -456,6 +456,42 @@ func TestShowChangeReportsAnEmptyRange(t *testing.T) {
 	}
 }
 
+// B3 rolls the manifest up to file granularity when the diff is wide, and a
+// file-granularity range can cover the whole file. Over the cap the drill must
+// refuse — never hand back a body that has been quietly cut down to fit.
+func TestShowChangeRefusesRatherThanTruncating(t *testing.T) {
+	repo := drillRepo(t, "app.py", drillBase, drillAfter)
+	t.Setenv("RIG_DRILL_MAX_BYTES", "40")
+
+	_, err := ShowChange(context.Background(), repo, "app.py", 1, 999, "diff")
+	if err == nil {
+		t.Fatal("an over-cap drill was served instead of refused")
+	}
+	// The refusal has to be actionable: it names the ranges worth asking for.
+	if !strings.Contains(err.Error(), "drill one of these narrower ranges") {
+		t.Errorf("refusal is not actionable: %v", err)
+	}
+	for _, span := range []string{"2-9", "11-15"} {
+		if !strings.Contains(err.Error(), span) {
+			t.Errorf("refusal omits hunk span %s: %v", span, err)
+		}
+	}
+}
+
+func TestShowChangeCapDoesNotMeterARefusal(t *testing.T) {
+	repo := drillRepo(t, "app.py", drillBase, drillAfter)
+	t.Setenv("RIG_DRILL_MAX_BYTES", "40")
+	beforeCalls, beforeBytes := DrilledSoFar()
+
+	if _, err := ShowChange(context.Background(), repo, "app.py", 1, 999, "diff"); err == nil {
+		t.Fatal("expected a refusal")
+	}
+	calls, bytes := DrilledSoFar()
+	if calls != beforeCalls || bytes != beforeBytes {
+		t.Errorf("a refused drill was metered: %d calls / %d B entered the count", calls-beforeCalls, bytes-beforeBytes)
+	}
+}
+
 func TestShowChangeRejectsUnknownKind(t *testing.T) {
 	repo := drillRepo(t, "app.py", drillBase, drillAfter)
 	if _, err := ShowChange(context.Background(), repo, "app.py", 1, 5, "summary"); err == nil {

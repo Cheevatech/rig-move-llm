@@ -36,6 +36,17 @@ const (
 // to judge in place.
 func drillContext() int { return envInt("RIG_DRILL_CONTEXT", 3) }
 
+// drillMaxBytes bounds one drill. A file-granularity manifest entry spans the
+// whole file (B3 rolls entries up when the diff is wide), so an unbounded drill
+// on one can hand back the very payload the tier withheld.
+//
+// Over the cap the drill REFUSES; it does not truncate. Truncating would put a
+// clipped body in front of review while looking like a complete one, which is
+// the exact blindness this file exists to prevent — a refusal that names the
+// hunks and their line spans leaves MAIN able to act (drill narrower), and
+// leaves it unable to mistake a part for the whole.
+func drillMaxBytes() int { return envInt("RIG_DRILL_MAX_BYTES", 64<<10) }
+
 // DrillResult is one drill. Body is verbatim: for a diff it is a run of git's
 // output, for a test log it is a byte range of the parked file.
 type DrillResult struct {
@@ -85,13 +96,36 @@ func ShowChange(ctx context.Context, repo, file string, startLine, endLine int, 
 			return nil, fmt.Errorf("read %s: %w", file, err)
 		}
 		res.Body = sliceLines(string(b), startLine, endLine)
+		if len(res.Body) > drillMaxBytes() {
+			return nil, fmt.Errorf("lines %d-%d of %s are %d B, over the %d B drill cap — ask for a narrower range (the log has %d lines)",
+				startLine, endLine, file, len(res.Body), drillMaxBytes(), len(diffLines(string(b))))
+		}
 	} else {
 		out := gitOut(ctx, repo, "diff", "-U"+strconv.Itoa(drillContext()), "--", file)
 		res.Body, res.Hunks = sliceDiff(out, startLine, endLine)
+		if len(res.Body) > drillMaxBytes() {
+			return nil, fmt.Errorf("lines %d-%d of %s cover %d hunk(s) / %d B, over the %d B drill cap — drill one of these narrower ranges instead: %s",
+				startLine, endLine, file, res.Hunks, len(res.Body), drillMaxBytes(), strings.Join(hunkSpans(out), ", "))
+		}
 	}
 
 	meterDrill(len(res.Body))
 	return res, nil
+}
+
+// hunkSpans lists the post-change line range of each hunk, so a refused drill
+// tells MAIN exactly which narrower ranges are worth asking for.
+func hunkSpans(out string) []string {
+	var spans []string
+	for _, ln := range diffLines(out) {
+		if !strings.HasPrefix(ln.text, "@@") {
+			continue
+		}
+		if start, count := hunkNewSpan(ln.text); start > 0 {
+			spans = append(spans, fmt.Sprintf("%d-%d", start, start+count-1))
+		}
+	}
+	return spans
 }
 
 // sliceDiff keeps the hunks of a single-file unified diff whose post-change span

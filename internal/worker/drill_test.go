@@ -522,13 +522,13 @@ func TestOnToolsCallRoutesShowChange(t *testing.T) {
 	if res["isError"] == true {
 		t.Fatalf("tool reported an error: %+v", res)
 	}
-	text := toolResultText(t, res)
+	text := drillResultText(t, res)
 	if !strings.Contains(text, "+    total = x + 1") {
 		t.Fatalf("drilled body did not reach the MCP result:\n%s", text)
 	}
 }
 
-func toolResultText(t *testing.T, res map[string]any) string {
+func drillResultText(t *testing.T, res map[string]any) string {
 	t.Helper()
 	content, ok := res["content"].([]map[string]any)
 	if !ok || len(content) == 0 {

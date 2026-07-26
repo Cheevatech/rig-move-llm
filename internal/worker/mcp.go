@@ -235,9 +235,7 @@ func (s *Server) onToolsCall(params json.RawMessage) (map[string]any, *rpcError)
 	// read the diff in order to decide whether to read the diff.
 	payload := TierResult(res, args.Repo, returnThreshold())
 	body, _ := json.MarshalIndent(payload, "", "  ")
-	logStderr("worker.implement done stopped=%s iters=%d in=%d out=%d files=%v tier=%s diff_tokens=%d",
-		res.Stopped, res.Iterations, res.InputTokens, res.OutputTokens, res.FilesChanged,
-		payload.Tier, payload.DiffTokens)
+	logStderr("%s", implementSummary(res, payload))
 	return toolText(string(body), res.Stopped == "error"), nil
 }
 
@@ -360,5 +358,34 @@ func dirExists(p string) bool {
 }
 
 func logStderr(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "[rig-worker] "+format+"\n", args...)
+	line := fmt.Sprintf("[rig-worker] "+format+"\n", args...)
+	fmt.Fprint(os.Stderr, line)
+	// A stdio MCP server's stderr belongs to whoever launched it — under Claude
+	// Code it disappears into CC's own logs, out of reach of the measurement
+	// harness. RIG_WORKER_LOG mirrors the same lines into a file the harness owns.
+	if path := strings.TrimSpace(os.Getenv("RIG_WORKER_LOG")); path != "" {
+		if f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+			_, _ = f.WriteString(line)
+			_ = f.Close()
+		}
+	}
+}
+
+// implementSummary is the one line a measurement run reads back to tune the two
+// numbers B3 left as guesses: RIG_RETURN_THRESHOLD, and the ×2 rule that drops
+// the manifest from per-symbol to per-file. Tuning either needs what the gate
+// decided (tier, granularity) *and* what it cost (manifest_tokens beside
+// diff_tokens) on the same return.
+func implementSummary(res Result, tiered TieredResult) string {
+	manifestTokens := 0
+	if tiered.Tier != "full" {
+		// What MAIN actually receives, measured on the payload itself.
+		body, _ := json.MarshalIndent(tiered, "", "  ")
+		manifestTokens = estimateTokens(string(body))
+	}
+	return fmt.Sprintf(
+		"worker.implement done stopped=%s iters=%d in=%d out=%d files=%v tier=%s granularity=%s diff_tokens=%d manifest_tokens=%d threshold_tokens=%d changes=%d",
+		res.Stopped, res.Iterations, res.InputTokens, res.OutputTokens, res.FilesChanged,
+		tiered.Tier, tiered.Granularity, tiered.DiffTokens, manifestTokens,
+		tiered.ThresholdTokens, len(tiered.Changes))
 }

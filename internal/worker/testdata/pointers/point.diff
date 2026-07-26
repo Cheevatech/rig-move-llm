@@ -1,0 +1,59 @@
+diff --git a/helpers.py b/helpers.py
+new file mode 100644
+index 0000000..583a823
+--- /dev/null
++++ b/helpers.py
+@@ -0,0 +1,2 @@
++def simplify(expr):
++    return expr
+diff --git a/point.py b/point.py
+index d1a5eb6..da8df69 100644
+--- a/point.py
++++ b/point.py
+@@ -2,7 +2,7 @@
+ 
+ from functools import reduce
+ 
+-ORIGIN_CACHE = {}
++ORIGIN_CACHE = {"origin": None}
+ DEFAULT_DIM = 2
+ 
+ 
+@@ -24,8 +24,8 @@ class Point:
+         return Point([a + b for a, b in zip(s, o)])
+ 
+     def __mul__(self, factor):
+-        coords = [x * factor for x in self.args]
+-        return Point(coords)
++        coords = [simplify(x * factor) for x in self.args]
++        return Point(coords, evaluate=False)
+ 
+     @property
+     def bounds(self):
+@@ -33,6 +33,8 @@ class Point:
+ 
+     def _normalize(self, other):
+         def pad(seq, n):
++            if n <= len(seq):
++                return list(seq)
+             filler = [0] * (n - len(seq))
+             return seq + filler
+ 
+@@ -43,12 +45,15 @@ class Point2D(Point):
+     def rotate(self, angle):
+         return self
+ 
++    def scale(self, factor):
++        return self * factor
++
+ 
+ async def load_points(path):
++    await _warm(path)
+     return []
+ 
+ 
+ def top_level():
+     c = 1
+-    d = 2
+-    return c + d
++    return c

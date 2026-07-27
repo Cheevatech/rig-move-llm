@@ -221,8 +221,11 @@ func (e *Engine) parseCCStream(r interface{ Read([]byte) (int, error) }, mirror 
 				if !ok || !ccIsGateCommand(cmd) {
 					continue
 				}
+				// Untruncated, matching C0's LastTest: the summary line lives at the
+				// END of a verbose pytest run, and cutting the tail is exactly how a
+				// green gate goes missing from the return.
 				if txt := ccResultText(b); txt != "" {
-					res.LastTest = truncate(txt, defaultMaxOutputB)
+					res.LastTest = txt
 				}
 			}
 		case "result":

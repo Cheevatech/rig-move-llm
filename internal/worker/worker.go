@@ -124,6 +124,12 @@ func (e *Engine) Implement(ctx context.Context, repo, task, gateDir string) Resu
 		return res
 	}
 
+	// B5: the whole loop below can be swapped for a native `claude -p` worker;
+	// the Result contract is identical, so MAIN cannot tell the engines apart.
+	if ccEnabled() {
+		return e.implementCC(ctx, absRepo, task, gateDir)
+	}
+
 	user := task
 	if gateDir != "" {
 		user += "\n\n(A frozen test contract exists under " + gateDir + " — do not modify it; make the product code pass it.)"

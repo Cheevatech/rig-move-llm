@@ -108,10 +108,15 @@ shape either way.
   `claude` CLI on PATH and an **Anthropic-format** endpoint for the worker model.
 
 ```sh
-RIG_WORKER_ENGINE=cc                 # loop (default) | cc
+RIG_WORKER_ENGINE=                   # auto (default): cc when RIG_CC_BASE_URL is set, loop otherwise | cc | loop
 RIG_CC_BASE_URL=http://localhost:4001  # REQUIRED for cc: Anthropic-format endpoint for the worker model
 RIG_CC_MODEL=haiku                   # model name the subprocess runs as (default haiku)
 ```
+
+**Engine selection is automatic** (v0.6.1, after the cc engine passed its evidence gate on
+catch-rate, a fresh repo, and a second endpoint): configuring `RIG_CC_BASE_URL` is the opt-in —
+the cc engine runs whenever it is set. An install without it keeps the loop, and
+`RIG_WORKER_ENGINE=loop` forces the loop even with a base URL configured.
 
 `RIG_CC_BASE_URL` is a hard requirement, not a default: with it empty the engine **refuses to
 launch**, because the subprocess would otherwise bill its inference to your paid Anthropic account —

@@ -167,15 +167,47 @@ func TestCCMaxTurnsMapsToIterationCap(t *testing.T) {
 }
 
 func TestCCEngineOffKeepsLoop(t *testing.T) {
-	// With the switch unset, Implement must NOT reach for the CC binary: it runs
-	// the 3-tool loop, which here fails fast on an unreachable endpoint.
+	// With the switch unset AND no cc base URL, Implement must NOT reach for the
+	// CC binary: it runs the 3-tool loop, which here fails fast on an
+	// unreachable endpoint.
 	repo := ccTestRepo(t)
 	t.Setenv("RIG_WORKER_ENGINE", "")
+	t.Setenv("RIG_CC_BASE_URL", "")
 	t.Setenv("RIG_CC_BIN", "/nonexistent/definitely-not-run")
 	e := NewEngine(config.Config{WorkerAPIBase: "http://127.0.0.1:1/v1"})
 	res := e.Implement(context.Background(), repo, "fix", "")
 	if !strings.Contains(res.Err, "chat:") {
 		t.Fatalf("expected the 3-tool loop's chat error, got %q", res.Err)
+	}
+}
+
+// The P4 auto-default: with the switch UNSET but a cc base URL configured, the
+// cc engine runs — the user who wired the prerequisites gets the engine that
+// won the flip gate without touching RIG_WORKER_ENGINE.
+func TestCCAutoDefaultWithBaseURL(t *testing.T) {
+	repo := ccTestRepo(t)
+	bin, _ := ccFakeBin(t, t.TempDir(), ccHappyStream)
+	t.Setenv("RIG_WORKER_ENGINE", "")
+	t.Setenv("RIG_CC_BIN", bin)
+	t.Setenv("RIG_CC_BASE_URL", "http://127.0.0.1:9/worker-leg")
+
+	res := NewEngine(config.Config{}).Implement(context.Background(), repo, "fix", "")
+	if res.Stopped != "done" || !strings.Contains(res.Summary, "Fixed the condition") {
+		t.Fatalf("auto-default did not run the cc engine: stopped=%q summary=%q", res.Stopped, res.Summary)
+	}
+}
+
+// An explicit non-cc value always forces the loop, even with a base URL set —
+// the documented off switch after the auto-default flip.
+func TestCCExplicitLoopBeatsAutoDefault(t *testing.T) {
+	repo := ccTestRepo(t)
+	t.Setenv("RIG_WORKER_ENGINE", "loop")
+	t.Setenv("RIG_CC_BASE_URL", "http://127.0.0.1:9/worker-leg")
+	t.Setenv("RIG_CC_BIN", "/nonexistent/definitely-not-run")
+	e := NewEngine(config.Config{WorkerAPIBase: "http://127.0.0.1:1/v1"})
+	res := e.Implement(context.Background(), repo, "fix", "")
+	if !strings.Contains(res.Err, "chat:") {
+		t.Fatalf("explicit loop must beat the auto-default, got %q", res.Err)
 	}
 }
 

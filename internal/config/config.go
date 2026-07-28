@@ -49,11 +49,12 @@ type Config struct {
 	// to Claude). Set via VERIFY_CMD, e.g. "pytest -q". When empty the cascade uses
 	// a weaker compile/lint + non-empty-diff floor instead (see internal/cli).
 	VerifyCmd string
-	// WorkerEngine selects how the worker MCP's implement tool runs (map10 P2):
-	//   "" / "loop" (default) — the built-in 3-tool loop.
-	//   "cc"                  — a native `claude -p` subprocess whose inference
-	//                           runs on the worker endpoint (B5). Needs the
-	//                           claude CLI on PATH and CCBaseURL set.
+	// WorkerEngine selects how the worker MCP's implement tool runs (map10 P2;
+	// auto-default since P4's flip gate passed):
+	//   ""     (default) — auto: cc when CCBaseURL is configured, loop otherwise.
+	//   "cc"             — force the native `claude -p` subprocess (B5). Needs
+	//                      the claude CLI on PATH and CCBaseURL set.
+	//   "loop" (or any other value) — force the built-in 3-tool loop.
 	WorkerEngine string
 	// CCBaseURL is the Anthropic-format base URL the cc engine points its
 	// subprocess at (RIG_CC_BASE_URL). Required when WorkerEngine is "cc": with

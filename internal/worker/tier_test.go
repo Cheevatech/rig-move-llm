@@ -502,6 +502,7 @@ func TestMCPImplementReturnsTieredPayload(t *testing.T) {
 	}
 
 	t.Setenv("RIG_WORKER_API_BASE", be.URL)
+	t.Setenv("RIG_RETURN_TIERING", "1")
 	in := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"implement",` +
 		`"arguments":{"task":"make f return 2","repo":` + quote(repo) + `}}}` + "\n")
 	var out bytes.Buffer
@@ -529,6 +530,40 @@ func TestMCPImplementReturnsTieredPayload(t *testing.T) {
 	parked, err := os.ReadFile(filepath.Join(repo, payload.Verify.Drill.File))
 	if err != nil || !strings.Contains(string(parked), "re-cache forever") {
 		t.Errorf("parked log missing or wrong: %v", err)
+	}
+}
+
+// With the switch unset, the implement reply must be the plain C0 Result —
+// no tiering vocabulary at all — because that is the surface every winning B5
+// number was measured against (map10 P1).
+func TestMCPImplementDefaultIsC0Shaped(t *testing.T) {
+	repo := gitRepo(t)
+	be := fakeBackend(t, []translate.OpenAIResponse{
+		toolCallResp("c1", "write_file", `{"path":"app.py","content":"def f():\n    return 2\n"}`),
+		finalResp("Changed f() to return 2."),
+	})
+	defer be.Close()
+
+	t.Setenv("RIG_WORKER_API_BASE", be.URL)
+	in := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"implement",` +
+		`"arguments":{"task":"make f return 2","repo":` + quote(repo) + `}}}` + "\n")
+	var out bytes.Buffer
+	if err := Serve(config.Config{WorkerAPIBase: be.URL, WorkerModel: "test"}, in, &out); err != nil {
+		t.Fatal(err)
+	}
+
+	text := toolResultText(t, out.String())
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(text), &raw); err != nil {
+		t.Fatalf("tool reply is not JSON: %v\n%s", err, text)
+	}
+	for _, k := range []string{"tier", "threshold_tokens", "changes", "verify"} {
+		if _, there := raw[k]; there {
+			t.Errorf("default reply carries tiering key %q — the gate must be opt-in", k)
+		}
+	}
+	if _, there := raw["diff"]; !there {
+		t.Error("default reply is missing the plain diff field")
 	}
 }
 

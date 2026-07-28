@@ -58,6 +58,19 @@ func ccFakeBin(t *testing.T, dir, stream string) (bin, outDir string) {
 const ccHappyStream = `{"type":"system","subtype":"init","session_id":"s"}
 {"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"git diff"}}]}}
 {"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"NOT-A-GATE"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"p1","name":"Bash","input":{"command":"python -m pytest -q rig_proof_test.py"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"p1","is_error":true,"content":"1 failed in 0.01s"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"p2","name":"Bash","input":{"command":"python -m pytest -q rig_proof_test.py"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"p2","content":"1 passed in 0.01s"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t2","name":"Bash","input":{"command":"python -m pytest tests/test_x.py -q"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":[{"type":"text","text":"1 passed in 0.01s"}]}]}}
+{"type":"result","subtype":"success","result":"Fixed the condition and verified.","num_turns":4,"usage":{"input_tokens":111,"output_tokens":22},"total_cost_usd":0}
+`
+
+// ccNoProofStream is ccHappyStream minus the proof-of-flip pair: the worker
+// claims done, gate green, but never demonstrated red->green (V6 false-accept
+// shape).
+const ccNoProofStream = `{"type":"system","subtype":"init","session_id":"s"}
 {"type":"assistant","message":{"content":[{"type":"tool_use","id":"t2","name":"Bash","input":{"command":"python -m pytest tests/test_x.py -q"}}]}}
 {"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":[{"type":"text","text":"1 passed in 0.01s"}]}]}}
 {"type":"result","subtype":"success","result":"Fixed the condition and verified.","num_turns":4,"usage":{"input_tokens":111,"output_tokens":22},"total_cost_usd":0}

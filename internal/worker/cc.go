@@ -100,7 +100,13 @@ func (e *Engine) implementCC(ctx context.Context, absRepo, task, gateDir string)
 
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Dir = absRepo
-	cmd.Env = append(os.Environ(), "ANTHROPIC_BASE_URL="+base)
+	// The dummy API key does two jobs: it keeps the subprocess off the user's
+	// OAuth/keychain credentials entirely (auth hygiene — the worker leg must not
+	// ride the subscription identity), and it satisfies CC's headless auth check.
+	// The local endpoint does not validate it (proven by the smoke shot).
+	cmd.Env = append(os.Environ(),
+		"ANTHROPIC_BASE_URL="+base,
+		"ANTHROPIC_API_KEY="+ccAPIKey())
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -144,6 +150,15 @@ func (e *Engine) implementCC(ctx context.Context, absRepo, task, gateDir string)
 
 	res.Diff, res.FilesChanged = e.collectDiff(ctx, absRepo)
 	return res
+}
+
+// ccAPIKey is the placeholder key the subprocess authenticates with against the
+// LOCAL endpoint. Overridable for endpoints that do validate (RIG_CC_API_KEY).
+func ccAPIKey() string {
+	if v := strings.TrimSpace(os.Getenv("RIG_CC_API_KEY")); v != "" {
+		return v
+	}
+	return "sk-rig-cc-worker-local"
 }
 
 // ccModel is the model name the subprocess runs as. It doubles as the routing

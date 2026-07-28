@@ -46,7 +46,7 @@ func ccFakeBin(t *testing.T, dir, stream string) (bin, outDir string) {
 	bin = filepath.Join(dir, "fake-claude")
 	script := "#!/bin/bash\n" +
 		"printf '%s\\n' \"$@\" > '" + outDir + "/args.txt'\n" +
-		"echo \"$ANTHROPIC_BASE_URL\" > '" + outDir + "/env.txt'\n" +
+		"echo \"$ANTHROPIC_BASE_URL $ANTHROPIC_API_KEY\" > '" + outDir + "/env.txt'\n" +
 		"echo edited-by-worker >> file.txt\n" +
 		"cat '" + streamFile + "'\n"
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
@@ -114,8 +114,8 @@ func TestCCImplementHappyPath(t *testing.T) {
 		}
 	}
 	env, _ := os.ReadFile(filepath.Join(outDir, "env.txt"))
-	if strings.TrimSpace(string(env)) != "http://127.0.0.1:9/worker-leg" {
-		t.Errorf("subprocess ANTHROPIC_BASE_URL=%q", env)
+	if strings.TrimSpace(string(env)) != "http://127.0.0.1:9/worker-leg sk-rig-cc-worker-local" {
+		t.Errorf("subprocess base/key = %q", env)
 	}
 	arch, err := os.ReadFile(archive)
 	if err != nil || !strings.Contains(string(arch), "fix the bug") {

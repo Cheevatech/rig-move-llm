@@ -60,6 +60,28 @@ func cmdSetup(args []string) int {
 	}
 	o.enabled = o.workerBase != ""
 
+	// 2b. Worker engine — HOW the offloaded work runs. Only asked when a worker
+	// endpoint exists; the default stays the built-in loop (map10: cc flips to
+	// default only after the P4 evidence gate passes, never because of lab numbers).
+	if o.workerBase != "" {
+		fmt.Println()
+		eng := tui.Select("Worker engine — how should the worker execute?", []tui.Option{
+			{Label: "loop", Description: "built-in 3-tool loop (no extra dependencies)", Recommended: true},
+			{Label: "cc", Description: "native `claude -p` subprocess on your endpoint (experimental; needs the claude CLI + an Anthropic-format endpoint)"},
+		}, 0)
+		if eng == 1 {
+			base := tui.Prompt("cc base URL (REQUIRED for cc)",
+				"Anthropic-format endpoint for the worker model, e.g. http://localhost:4001 — Enter to keep the loop engine", "")
+			if base == "" {
+				fmt.Println("  no cc base URL — keeping the loop engine (the cc engine refuses to run without one; it would bill the worker leg to your paid account).")
+			} else {
+				o.workerEngine = "cc"
+				o.ccBase = base
+				o.ccModel = tui.Prompt("cc model name", "model the subprocess runs as", "haiku")
+			}
+		}
+	}
+
 	// 3. Make the binary permanent. The hooks invoke `rig-move-llm ...`, so it must
 	//    stay on PATH — but `npx rig-move-llm` runs transiently. Install it globally
 	//    now (that is what makes this a single command). Skipped when it is already

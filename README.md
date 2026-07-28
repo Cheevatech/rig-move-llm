@@ -95,6 +95,32 @@ The setup wizard collects these for you — this is what it writes to `config.en
 **global** (all projects, follows you) or **project** (this dir only); `ENABLED` gates the whole
 thing on/off.
 
+### Worker engine: loop (default) or cc (experimental)
+
+The worker MCP's `implement` tool has two interchangeable engines; MAIN sees the same result
+shape either way.
+
+- **`loop`** (default) — the built-in 3-tool loop (read / edit / run) driving your OpenAI-compatible
+  endpoint. No extra dependencies.
+- **`cc`** (experimental) — the worker runs as a native `claude -p` subprocess whose inference is
+  pointed at **your** endpoint, so it brings the full Claude Code harness (investigate, edit, test,
+  self-correct) to one delegation instead of bouncing rounds back to the main agent. Requires the
+  `claude` CLI on PATH and an **Anthropic-format** endpoint for the worker model.
+
+```sh
+RIG_WORKER_ENGINE=cc                 # loop (default) | cc
+RIG_CC_BASE_URL=http://localhost:4001  # REQUIRED for cc: Anthropic-format endpoint for the worker model
+RIG_CC_MODEL=haiku                   # model name the subprocess runs as (default haiku)
+```
+
+`RIG_CC_BASE_URL` is a hard requirement, not a default: with it empty the engine **refuses to
+launch**, because the subprocess would otherwise bill its inference to your paid Anthropic account —
+the account this tool exists to protect. The subprocess authenticates with a dummy key (your
+OAuth/keychain identity is never exposed to the worker leg) and runs with web tools disabled. If your
+`claude` binary is too old to speak `--output-format stream-json`, the run fails with an explicit
+version-skew error rather than an empty result. The setup wizard offers this choice under
+"Worker engine"; the default stays `loop`.
+
 ### Automatic worker fallback (zero-token)
 
 The worker endpoint is bring-your-own, so it can be down when Claude Code is not. At the **start of

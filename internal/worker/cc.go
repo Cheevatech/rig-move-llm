@@ -133,12 +133,24 @@ func (e *Engine) implementCC(ctx context.Context, absRepo, task, gateDir string)
 		}
 	}
 
-	sawResult := e.parseCCStream(stdout, mirror, &res)
+	sawResult, jsonLines, totalLines := e.parseCCStream(stdout, mirror, &res)
 	werr := cmd.Wait()
 
 	if !sawResult {
 		res.Stopped = "error"
 		msg := "cc: stream ended without a result event"
+		// Version-skew guard (map10 P2): a claude CLI whose output is not the
+		// stream-json this parser knows must surface as a diagnosis, never as a
+		// silent empty return. Two skews are distinguishable: output that is not
+		// JSON at all, and stream-json whose events no longer carry a terminal
+		// result.
+		if totalLines > 0 && jsonLines == 0 {
+			msg = fmt.Sprintf("cc: %s produced %d lines of output but none parsed as stream-json — "+
+				"claude CLI version skew? Verify `%s --version` supports `--output-format stream-json`", bin, totalLines, bin)
+		} else if jsonLines > 0 {
+			msg += fmt.Sprintf(" (parsed %d stream-json lines but no terminal result — "+
+				"claude CLI version skew, or the run was killed mid-stream)", jsonLines)
+		}
 		if werr != nil {
 			msg += " (" + werr.Error() + ")"
 		}
@@ -179,15 +191,15 @@ func ccModel() string {
 //	{"type":"assistant","message":{"content":[{"type":"tool_use","id":..,"name":"Bash","input":{"command":..}}]}}
 //	{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":..,"content":..}]}}
 //	{"type":"result","subtype":"success","result":..,"num_turns":..,"usage":{..}}
-func (e *Engine) parseCCStream(r interface{ Read([]byte) (int, error) }, mirror *os.File, res *Result) bool {
+func (e *Engine) parseCCStream(r interface{ Read([]byte) (int, error) }, mirror *os.File, res *Result) (sawResult bool, jsonLines, totalLines int) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 1<<20), 1<<24) // tool results can be large
 
 	bashCmd := map[string]string{} // tool_use id -> Bash command
-	sawResult := false
 
 	for sc.Scan() {
 		line := sc.Bytes()
+		totalLines++
 		if mirror != nil {
 			mirror.Write(append(append([]byte{}, line...), '\n'))
 		}
@@ -208,6 +220,7 @@ func (e *Engine) parseCCStream(r interface{ Read([]byte) (int, error) }, mirror 
 		if json.Unmarshal(line, &ev) != nil {
 			continue
 		}
+		jsonLines++
 
 		switch ev.Type {
 		case "assistant":
@@ -263,7 +276,7 @@ func (e *Engine) parseCCStream(r interface{ Read([]byte) (int, error) }, mirror 
 			}
 		}
 	}
-	return sawResult
+	return sawResult, jsonLines, totalLines
 }
 
 // ccBlock is one content block of an assistant/user stream event.

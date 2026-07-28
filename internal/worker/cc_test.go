@@ -197,3 +197,22 @@ func TestCCIsGateCommand(t *testing.T) {
 		}
 	}
 }
+
+// Version-skew guard (map10 P2): a claude CLI whose output is not stream-json —
+// an older binary that does not know --output-format, a changed format — must
+// surface as a diagnosis naming the suspected skew, never as a silent empty
+// return or a bare "no result event".
+func TestCCNonJSONOutputDiagnosesVersionSkew(t *testing.T) {
+	repo := ccTestRepo(t)
+	bin, _ := ccFakeBin(t, t.TempDir(),
+		"error: unknown option '--output-format'\nUsage: claude [options] [command]\n")
+	ccEnv(t, bin)
+
+	res := NewEngine(config.Config{}).Implement(context.Background(), repo, "fix", "")
+	if res.Stopped != "error" || !strings.Contains(res.Err, "version skew") {
+		t.Fatalf("stopped=%q err=%q", res.Stopped, res.Err)
+	}
+	if !strings.Contains(res.Err, "stream-json") {
+		t.Errorf("the error should name the expected format, got %q", res.Err)
+	}
+}

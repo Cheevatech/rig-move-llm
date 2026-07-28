@@ -219,7 +219,21 @@ func cmdHook(args []string) int {
 func cmdWorker(args []string) int {
 	fs := flag.NewFlagSet("worker", flag.ExitOnError)
 	_ = fs.Parse(args)
-	if err := worker.Serve(config.Load(), os.Stdin, os.Stdout); err != nil {
+	cfg := config.Load()
+	// The cc engine reads its knobs from the environment — the exact surface the
+	// B5 numbers were measured on — so config-file values are promoted to env
+	// here. Load already resolved precedence env-first, so re-setting the
+	// resolved value never overrides an explicitly-set variable.
+	for k, v := range map[string]string{
+		"RIG_WORKER_ENGINE": cfg.WorkerEngine,
+		"RIG_CC_BASE_URL":   cfg.CCBaseURL,
+		"RIG_CC_MODEL":      cfg.CCModel,
+	} {
+		if v != "" {
+			os.Setenv(k, v)
+		}
+	}
+	if err := worker.Serve(cfg, os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "worker:", err)
 		return 1
 	}

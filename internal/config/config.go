@@ -49,6 +49,21 @@ type Config struct {
 	// to Claude). Set via VERIFY_CMD, e.g. "pytest -q". When empty the cascade uses
 	// a weaker compile/lint + non-empty-diff floor instead (see internal/cli).
 	VerifyCmd string
+	// WorkerEngine selects how the worker MCP's implement tool runs (map10 P2):
+	//   "" / "loop" (default) — the built-in 3-tool loop.
+	//   "cc"                  — a native `claude -p` subprocess whose inference
+	//                           runs on the worker endpoint (B5). Needs the
+	//                           claude CLI on PATH and CCBaseURL set.
+	WorkerEngine string
+	// CCBaseURL is the Anthropic-format base URL the cc engine points its
+	// subprocess at (RIG_CC_BASE_URL). Required when WorkerEngine is "cc": with
+	// it empty the engine refuses to launch, because the subprocess would
+	// otherwise bill the worker leg to the paid account (money-safety rail).
+	CCBaseURL string
+	// CCModel is the model name the cc subprocess runs as (RIG_CC_MODEL,
+	// default "haiku" — the worker-leg routing key on the model-routing shim,
+	// passed through verbatim to a direct endpoint).
+	CCModel string
 	// RouteAllToWorker is the route-cc-on-qwen prototype flag (RIG_ROUTE_ALL_TO_WORKER).
 	// When true the proxy stops forwarding /v1/messages to the paid Anthropic upstream
 	// and instead translates every inference to the worker (qwen) leg: an UNMODIFIED
@@ -194,6 +209,9 @@ func LoadFrom(projectDir string) Config {
 		HealthCacheSec:   healthCache,
 		GateMode:         gateMode,
 		VerifyCmd:        strings.TrimSpace(get("VERIFY_CMD")),
+		WorkerEngine:     strings.ToLower(strings.TrimSpace(get("RIG_WORKER_ENGINE"))),
+		CCBaseURL:        strings.TrimRight(strings.TrimSpace(get("RIG_CC_BASE_URL")), "/"),
+		CCModel:          strings.TrimSpace(get("RIG_CC_MODEL")),
 		RouteAllToWorker: truthy(get("RIG_ROUTE_ALL_TO_WORKER")),
 	}
 }

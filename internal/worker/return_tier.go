@@ -109,6 +109,13 @@ const defaultReturnThreshold = 2000
 // mould as RIG_WORKER_CTX_LIMIT.
 func returnThreshold() int { return envInt("RIG_RETURN_THRESHOLD", defaultReturnThreshold) }
 
+// returnTieringOn reports whether the tiered return is applied at all
+// (RIG_RETURN_TIERING=1). The default is OFF: the B6 gate failed the tiered
+// return on both the cost and the safety axis, and every number that justifies
+// the cc engine was measured against the plain C0 payload — so the product
+// ships that exact surface, and tiering stays an experiment-only opt-in.
+func returnTieringOn() bool { return envInt("RIG_RETURN_TIERING", 0) > 0 }
+
 // noIntent reports whether worker prose is suppressed entirely
 // (RIG_RETURN_NO_INTENT=1), leaving the return artifact deterministic: pointers
 // and verify facts only. R11 wants this lockable at the source.

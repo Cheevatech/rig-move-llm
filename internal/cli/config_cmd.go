@@ -116,7 +116,7 @@ func printScope(label, path string) {
 // (they override both file scopes).
 func envOverrides() []string {
 	var out []string
-	for _, k := range []string{"ENABLED", "WORKER_API_BASE", "WORKER_MODEL", "WORKER_BACKEND", "WORKER_API_KEY", "WORKER_HEALTH_PATH", "PORT", "MAIN_UPSTREAM_URL"} {
+	for _, k := range []string{"ENABLED", "WORKER_API_BASE", "WORKER_MODEL", "WORKER_BACKEND", "WORKER_API_KEY", "WORKER_HEALTH_PATH", "PORT", "MAIN_UPSTREAM_URL", "RIG_WORKER_ENGINE", "RIG_CC_BASE_URL", "RIG_CC_MODEL"} {
 		if _, ok := os.LookupEnv(k); ok {
 			out = append(out, k)
 		}

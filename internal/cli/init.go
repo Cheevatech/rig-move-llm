@@ -23,8 +23,11 @@ type initOpts struct {
 	workerKey    string
 	mainUpstream string
 	port         string
-	enabled      bool // ENABLED written to config; false = wired but inert (Claude Code runs normally)
-	npxWorker    bool // spawn the worker MCP as `npx -y rig-move-llm worker` (zero global install)
+	workerEngine string // "" | "loop" | "cc" — RIG_WORKER_ENGINE (default: loop)
+	ccBase       string // RIG_CC_BASE_URL, required when workerEngine == "cc"
+	ccModel      string // RIG_CC_MODEL (default haiku)
+	enabled      bool   // ENABLED written to config; false = wired but inert (Claude Code runs normally)
+	npxWorker    bool   // spawn the worker MCP as `npx -y rig-move-llm worker` (zero global install)
 	service      bool
 	force        bool
 	noDetect     bool
@@ -43,6 +46,9 @@ func cmdInit(args []string) int {
 	workerKey := fs.String("worker-key", "", "worker API key (optional for local models)")
 	mainUpstream := fs.String("main-upstream", "https://api.anthropic.com", "paid (main-leg) upstream")
 	port := fs.String("port", "4000", "proxy listen port")
+	workerEngine := fs.String("worker-engine", "", "worker engine: loop (default, built-in 3-tool loop) | cc (native `claude -p` subprocess — experimental)")
+	ccBase := fs.String("cc-base-url", "", "cc engine: Anthropic-format base URL for the worker model (required with --worker-engine=cc)")
+	ccModel := fs.String("cc-model", "", "cc engine: model name the subprocess runs as (default haiku)")
 	npx := fs.Bool("npx", false, "spawn the worker via `npx -y rig-move-llm worker` (no global binary needed)")
 	force := fs.Bool("force", false, "overwrite an existing config file")
 	noDetect := fs.Bool("no-detect", false, "skip probing for a local worker endpoint")
@@ -51,6 +57,18 @@ func cmdInit(args []string) int {
 
 	if *svc && !*global {
 		fmt.Fprintln(os.Stderr, "init: --service requires --global (the daemon reads ~/.rig-move-llm/config.env, not a project dir)")
+		return 2
+	}
+	switch *workerEngine {
+	case "", "loop", "cc":
+	default:
+		fmt.Fprintln(os.Stderr, "init: --worker-engine must be loop or cc")
+		return 2
+	}
+	// Fail here, not at first delegation: the cc engine refuses to run without a
+	// base URL (its subprocess would bill the worker leg to the paid account).
+	if *workerEngine == "cc" && *ccBase == "" {
+		fmt.Fprintln(os.Stderr, "init: --worker-engine=cc requires --cc-base-url (an Anthropic-format endpoint for the worker model — the cc engine refuses to launch without one)")
 		return 2
 	}
 
@@ -71,7 +89,7 @@ func cmdInit(args []string) int {
 	return applyInit(initOpts{
 		global: *global, backend: *backend, workerBase: *workerBase,
 		workerModel: *workerModel, workerKey: *workerKey, mainUpstream: *mainUpstream,
-		port: *port,
+		port: *port, workerEngine: *workerEngine, ccBase: *ccBase, ccModel: *ccModel,
 		// A worker endpoint was configured -> enable; otherwise stay inert.
 		enabled:   *workerBase != "" || *backend != "",
 		npxWorker: *npx, service: *svc, force: *force, noDetect: *noDetect,
@@ -102,6 +120,7 @@ func applyInit(o initOpts) int {
 		if err := os.WriteFile(cfgPath, []byte(renderConfigEnv(configEnvVals{
 			backend: o.backend, workerBase: o.workerBase, workerModel: o.workerModel,
 			workerKey: o.workerKey, mainUpstream: o.mainUpstream, port: o.port,
+			workerEngine: o.workerEngine, ccBase: o.ccBase, ccModel: o.ccModel,
 			enabled: o.enabled,
 		})), 0o600); err != nil {
 			fmt.Fprintln(os.Stderr, "init: write config:", err)
@@ -236,6 +255,7 @@ func applyInit(o initOpts) int {
 
 type configEnvVals struct {
 	backend, workerBase, workerModel, workerKey, mainUpstream, port string
+	workerEngine, ccBase, ccModel                                   string
 	enabled                                                         bool
 }
 
@@ -257,6 +277,10 @@ func renderConfigEnv(v configEnvVals) string {
 	kv("worker OpenAI-compatible endpoint; overrides the backend default", "WORKER_API_BASE", v.workerBase)
 	kv("worker model name", "WORKER_MODEL", v.workerModel)
 	kv("worker API key (optional for local models; use an OpenRouter key for OpenRouter)", "WORKER_API_KEY", v.workerKey)
+	b.WriteString("\n")
+	kv("worker engine: loop (default, built-in 3-tool loop) | cc (native `claude -p` subprocess on the worker endpoint — experimental, needs the claude CLI on PATH)", "RIG_WORKER_ENGINE", v.workerEngine)
+	kv("cc engine only: Anthropic-format base URL for the worker model — REQUIRED for cc (keeps the worker leg off the paid account; the engine refuses to run without it)", "RIG_CC_BASE_URL", v.ccBase)
+	kv("cc engine only: model name the subprocess runs as (default haiku — the worker-leg routing key on the shim)", "RIG_CC_MODEL", v.ccModel)
 	b.WriteString("\n")
 	// Master on/off. Written explicitly so the state is unambiguous: false = wired
 	// but inert (Claude Code runs normally), flip to true after setting an endpoint.

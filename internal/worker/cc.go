@@ -8,9 +8,12 @@
 // map9 Notes #4: the cost driver is the number of rounds MAIN thinks, not the
 // bytes returned — this is the only lever left that attacks it directly.
 //
-// Selection: RIG_WORKER_ENGINE=cc. Anything else (or unset) keeps the original
-// loop, so a binary built from this branch behaves exactly like C0's until the
-// experiment arm opts in per-run.
+// Selection (map10 P4, auto-default after the flip gate passed on all three
+// axes): RIG_WORKER_ENGINE=cc forces the cc engine, any other non-empty value
+// forces the loop, and UNSET picks cc exactly when RIG_CC_BASE_URL is
+// configured — a user who wired the cc prerequisites gets the engine that won
+// the gate, everyone else keeps the loop, and a plain install can never break
+// on a missing claude CLI or base URL.
 //
 // Money safety: the subprocess MUST be pointed away from Anthropic
 // (RIG_CC_BASE_URL, normally the local Anthropic-format endpoint in front of
@@ -29,8 +32,17 @@ import (
 )
 
 // ccEnabled reports whether this implement call should run on the native-CC
-// engine instead of the 3-tool loop.
-func ccEnabled() bool { return strings.TrimSpace(os.Getenv("RIG_WORKER_ENGINE")) == "cc" }
+// engine instead of the 3-tool loop. See the selection rule in the package doc.
+func ccEnabled() bool {
+	switch strings.TrimSpace(os.Getenv("RIG_WORKER_ENGINE")) {
+	case "cc":
+		return true
+	case "":
+		return strings.TrimSpace(os.Getenv("RIG_CC_BASE_URL")) != ""
+	default:
+		return false
+	}
+}
 
 // ccSystemPrompt frames the CC worker the same way systemPrompt frames the
 // 3-tool loop, minus the tool inventory (CC brings its own). The self-correct

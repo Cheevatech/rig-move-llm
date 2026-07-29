@@ -482,6 +482,7 @@ func ccModel() string {
 //	{"type":"assistant","message":{"content":[{"type":"tool_use","id":..,"name":"Bash","input":{"command":..}}]}}
 //	{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":..,"content":..}]}}
 //	{"type":"result","subtype":"success","result":..,"num_turns":..,"usage":{..}}
+//
 // act is the liveness tracker the stall watchdog reads; it may be nil in tests
 // that only exercise parsing.
 func (e *Engine) parseCCStream(r interface{ Read([]byte) (int, error) }, mirror *os.File, res *Result, proof *ccProof, act *ccActivity) (sawResult bool, jsonLines, totalLines int) {

@@ -65,7 +65,7 @@ type Result struct {
 	// the engine itself killed on a wall/stall guard (#18) — distinct from
 	// "error" because the work may be half-done in the tree and because the right
 	// next move is to report it, never to re-delegate the same task blind.
-	Stopped      string `json:"stopped"`
+	Stopped string `json:"stopped"`
 	// HitIterationCap mirrors Stopped=="max_iters" as an explicit flag so MAIN's
 	// review knows the worker ran out of budget before declaring done.
 	HitIterationCap bool `json:"hit_iteration_cap,omitempty"`

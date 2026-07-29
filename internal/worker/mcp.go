@@ -21,8 +21,16 @@ const mcpProtocolVersion = "2024-11-05"
 
 // runTimeout bounds a single implement call end-to-end (the agentic loop can take
 // minutes on a local model). Overridable via RIG_WORKER_RUN_TIMEOUT (seconds).
+//
+// INVARIANT: this must stay BELOW the calling client's MCP progress watchdog —
+// Claude Code aborts a tool call that has sent nothing for 1800s. The old 3600s
+// default violated it, so every long round was killed by the client with rig
+// never getting to say why (#18): MAIN saw a bare abort, re-delegated, and the
+// abandoned round kept running behind the next one. 1500s leaves the engine a
+// margin to kill its own subprocess and return a diagnosis first. Raising this
+// past the client watchdog re-opens exactly that failure.
 func runTimeout() time.Duration {
-	return time.Duration(envInt("RIG_WORKER_RUN_TIMEOUT", 3600)) * time.Second
+	return time.Duration(envInt("RIG_WORKER_RUN_TIMEOUT", 1500)) * time.Second
 }
 
 // exploreTimeout bounds a single explore call. It is MUCH tighter than
@@ -267,7 +275,7 @@ func (s *Server) onToolsCall(params json.RawMessage) (map[string]any, *rpcError)
 		body, _ := json.MarshalIndent(res, "", "  ")
 		logStderr("worker.implement done stopped=%s iters=%d in=%d out=%d files=%v",
 			res.Stopped, res.Iterations, res.InputTokens, res.OutputTokens, res.FilesChanged)
-		return toolText(string(body), res.Stopped == "error"), nil
+		return toolText(string(body), res.Failed()), nil
 	}
 
 	// The return contract (R9): the diff and the test log are the two things that
@@ -278,7 +286,7 @@ func (s *Server) onToolsCall(params json.RawMessage) (map[string]any, *rpcError)
 	payload := TierResult(res, args.Repo, returnThreshold())
 	body, _ := json.MarshalIndent(payload, "", "  ")
 	logStderr("%s", implementSummary(res, payload))
-	return toolText(string(body), res.Stopped == "error"), nil
+	return toolText(string(body), res.Failed()), nil
 }
 
 // onExplore runs the Stage-0 explore loop and returns the gated report.

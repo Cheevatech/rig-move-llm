@@ -31,7 +31,7 @@ func parseProof(t *testing.T, stream string) *ccProof {
 	proof := &ccProof{}
 	var res Result
 	e := NewEngine(config.Config{})
-	e.parseCCStream(strings.NewReader(stream), nil, &res, proof)
+	e.parseCCStream(strings.NewReader(stream), nil, &res, proof, nil)
 	return proof
 }
 

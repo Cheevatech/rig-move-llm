@@ -29,6 +29,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
+	"time"
 )
 
 // ccEnabled reports whether this implement call should run on the native-CC
@@ -218,6 +220,13 @@ func (e *Engine) runCCOnce(ctx context.Context, bin, base, absRepo, user string,
 
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Dir = absRepo
+	// The round is bounded by two guards, and both must reach the whole process
+	// tree, not just `claude` itself (#18): the ctx deadline (the engine wall,
+	// deliberately shorter than the client's MCP watchdog) and the stall guard
+	// below. Cancel replaces CommandContext's default single-process kill.
+	setProcGroup(cmd)
+	cmd.Cancel = func() error { return killProcGroup(cmd) }
+	cmd.WaitDelay = 5 * time.Second
 	// The dummy API key does two jobs: it keeps the subprocess off the user's
 	// OAuth/keychain credentials entirely (auth hygiene — the worker leg must not
 	// ride the subscription identity), and it satisfies CC's headless auth check.
@@ -249,8 +258,26 @@ func (e *Engine) runCCOnce(ctx context.Context, bin, base, absRepo, user string,
 		}
 	}
 
-	sawResult, jsonLines, totalLines := e.parseCCStream(stdout, mirror, res, proof)
+	// Liveness watchdog: a round that goes silent must die with a diagnosis while
+	// the client is still listening, not sit mute until the MCP layer aborts it
+	// (#18). The stream itself is the liveness signal — every parsed line touches
+	// the tracker.
+	act := newCCActivity()
+	stopWatchdog := e.watchStall(cmd, act)
+
+	sawResult, jsonLines, totalLines := e.parseCCStream(stdout, mirror, res, proof, act)
+	stopWatchdog()
 	werr := cmd.Wait()
+
+	// A killed round reports WHY it died and what it was last seen doing, so MAIN
+	// has something to tell the human instead of re-delegating into the dark.
+	if !sawResult && firstRun {
+		if diag, stopped := ccTimeoutDiagnosis(ctx, act); diag != "" {
+			res.Stopped = stopped
+			res.Err = diag
+			return false
+		}
+	}
 
 	if !sawResult && firstRun {
 		res.Stopped = "error"
@@ -280,6 +307,154 @@ func (e *Engine) runCCOnce(ctx context.Context, bin, base, absRepo, user string,
 	return sawResult
 }
 
+// ccStallTimeout bounds how long the worker subprocess may produce NO stream
+// output at all before the engine kills it. Measured failure (#18): a cc round
+// on a doc-heavy task went silent and stayed silent until Claude Code aborted
+// the MCP call at 1800s — the caller learned nothing, and MAIN re-delegated into
+// the same silence. A live worker streams an event per tool call, so silence is
+// a real liveness signal — but it has ONE legitimate long form: a Bash tool call
+// emits nothing until the command returns, and Claude Code lets a command run
+// for roughly ten minutes. 600s therefore sits just past the longest honest
+// silence (a slow test suite) and well under the wall guard, which in turn sits
+// under the client watchdog. Lowering it below the bash ceiling starts killing
+// healthy rounds mid-test-run. 0 disables the guard.
+func ccStallTimeout() time.Duration {
+	return time.Duration(envInt("RIG_CC_STALL_TIMEOUT", 600)) * time.Second
+}
+
+// ccStallCheckInterval is how often the watchdog samples the tracker. It only
+// bounds the overshoot of the kill, not the guard itself, so it stays coarse for
+// the production limit and scales down for the short limits tests use.
+func ccStallCheckInterval(limit time.Duration) time.Duration {
+	if d := limit / 5; d < 10*time.Second {
+		return d
+	}
+	return 10 * time.Second
+}
+
+// ccActivity is the liveness record of one worker subprocess: when its stream
+// last produced anything, and what it was last seen doing. The parser writes it,
+// the watchdog reads it, so it is mutex-guarded.
+type ccActivity struct {
+	mu      sync.Mutex
+	started time.Time
+	at      time.Time
+	last    string
+	lines   int
+	stalled bool
+}
+
+func newCCActivity() *ccActivity {
+	now := time.Now()
+	return &ccActivity{started: now, at: now}
+}
+
+// touch records one line of stream activity. desc, when non-empty, replaces the
+// human-readable "last seen doing" note.
+func (a *ccActivity) touch(desc string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.at = time.Now()
+	a.lines++
+	if desc != "" {
+		a.last = desc
+	}
+}
+
+func (a *ccActivity) idle() time.Duration {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return time.Since(a.at)
+}
+
+func (a *ccActivity) elapsed() time.Duration {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return time.Since(a.started)
+}
+
+func (a *ccActivity) markStalled() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.stalled = true
+}
+
+func (a *ccActivity) isStalled() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.stalled
+}
+
+// lastSeen is the diagnosis line: what the worker was last observed doing, and
+// how many stream lines it produced before going quiet. "no output at all" is
+// itself a finding — it separates a hung launch from a worker that worked and
+// then died.
+func (a *ccActivity) lastSeen() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.lines == 0 {
+		return "no stream output at all (the subprocess never produced a single event)"
+	}
+	if a.last == "" {
+		return fmt.Sprintf("%d stream events, none of them a tool call", a.lines)
+	}
+	return fmt.Sprintf("%s (after %d stream events)", a.last, a.lines)
+}
+
+// watchStall starts the liveness watchdog and returns the function that stops
+// it. The watchdog kills the whole process group, which ends the stream and so
+// unblocks the parser — the caller then reads the verdict off the tracker.
+func (e *Engine) watchStall(cmd *exec.Cmd, act *ccActivity) (stop func()) {
+	limit := ccStallTimeout()
+	if limit <= 0 {
+		return func() {}
+	}
+	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(ccStallCheckInterval(limit))
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				if act.idle() < limit {
+					continue
+				}
+				act.markStalled()
+				logStderr("cc: no stream activity for %s — killing the worker process group (last: %s)",
+					act.idle().Round(time.Second), act.lastSeen())
+				_ = killProcGroup(cmd)
+				return
+			}
+		}
+	}()
+	return func() { close(done) }
+}
+
+// ccTimeoutDiagnosis turns a round that died on one of the two guards into the
+// message MAIN reads. It returns ("", "") when neither guard fired, leaving the
+// existing version-skew diagnostics to explain the missing result event.
+func ccTimeoutDiagnosis(ctx context.Context, act *ccActivity) (msg, stopped string) {
+	switch {
+	case act.isStalled():
+		return fmt.Sprintf(
+			"cc: worker killed by the engine stall guard — no stream output for %s (limit %s), %s wall. "+
+				"Last seen: %s. Any diff below is the partial work it had already written. "+
+				"Do NOT simply re-delegate the same task: a stall repeats. Report this to the human, "+
+				"or delegate a SMALLER, more concrete slice of the task.",
+			ccStallTimeout(), ccStallTimeout(), act.elapsed().Round(time.Second), act.lastSeen()), "timeout"
+	case ctx.Err() != nil:
+		return fmt.Sprintf(
+			"cc: worker killed by the engine wall guard after %s (RIG_WORKER_RUN_TIMEOUT). "+
+				"Last seen: %s. Any diff below is the partial work it had already written. "+
+				"Do NOT simply re-delegate the same task: it will hit the same wall. Report this to the "+
+				"human, or delegate a SMALLER, more concrete slice of the task.",
+			act.elapsed().Round(time.Second), act.lastSeen()), "timeout"
+	}
+	return "", ""
+}
+
 // ccAPIKey is the placeholder key the subprocess authenticates with against the
 // LOCAL endpoint. Overridable for endpoints that do validate (RIG_CC_API_KEY).
 func ccAPIKey() string {
@@ -307,7 +482,9 @@ func ccModel() string {
 //	{"type":"assistant","message":{"content":[{"type":"tool_use","id":..,"name":"Bash","input":{"command":..}}]}}
 //	{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":..,"content":..}]}}
 //	{"type":"result","subtype":"success","result":..,"num_turns":..,"usage":{..}}
-func (e *Engine) parseCCStream(r interface{ Read([]byte) (int, error) }, mirror *os.File, res *Result, proof *ccProof) (sawResult bool, jsonLines, totalLines int) {
+// act is the liveness tracker the stall watchdog reads; it may be nil in tests
+// that only exercise parsing.
+func (e *Engine) parseCCStream(r interface{ Read([]byte) (int, error) }, mirror *os.File, res *Result, proof *ccProof, act *ccActivity) (sawResult bool, jsonLines, totalLines int) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 1<<20), 1<<24) // tool results can be large
 
@@ -316,6 +493,9 @@ func (e *Engine) parseCCStream(r interface{ Read([]byte) (int, error) }, mirror 
 	for sc.Scan() {
 		line := sc.Bytes()
 		totalLines++
+		if act != nil {
+			act.touch("")
+		}
 		if mirror != nil {
 			mirror.Write(append(append([]byte{}, line...), '\n'))
 		}
@@ -341,6 +521,9 @@ func (e *Engine) parseCCStream(r interface{ Read([]byte) (int, error) }, mirror 
 		switch ev.Type {
 		case "assistant":
 			for _, b := range ccContentBlocks(ev.Message.Content) {
+				if b.Type == "tool_use" && act != nil {
+					act.touch(ccToolDesc(b))
+				}
 				if b.Type == "tool_use" && b.Name == "Bash" {
 					var in struct {
 						Command string `json:"command"`
@@ -396,6 +579,28 @@ func (e *Engine) parseCCStream(r interface{ Read([]byte) (int, error) }, mirror 
 		}
 	}
 	return sawResult, jsonLines, totalLines
+}
+
+// ccToolDesc renders one tool_use block as a short "what it was doing" note for
+// the stall diagnosis: the tool name plus whichever argument identifies the
+// target (the command for Bash, the path for the file tools).
+func ccToolDesc(b ccBlock) string {
+	name := b.Name
+	if name == "" {
+		name = "tool"
+	}
+	var in struct {
+		Command string `json:"command"`
+		Path    string `json:"file_path"`
+		Pattern string `json:"pattern"`
+	}
+	_ = json.Unmarshal(b.Input, &in)
+	for _, arg := range []string{in.Command, in.Path, in.Pattern} {
+		if arg = strings.TrimSpace(arg); arg != "" {
+			return name + " " + truncate(strings.Join(strings.Fields(arg), " "), 160)
+		}
+	}
+	return name
 }
 
 // ccBlock is one content block of an assistant/user stream event.

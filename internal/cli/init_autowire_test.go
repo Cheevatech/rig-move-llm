@@ -60,6 +60,11 @@ func TestInitAutoWire(t *testing.T) {
 		t.Errorf("enableAllProjectMcpServers not set: %v", settings["enableAllProjectMcpServers"])
 	}
 
+	// 2c. tool-use permission granted (#6): trust alone still stalls headless -p
+	if !permissionAllowed(settings, workerToolPermission) {
+		t.Errorf("permissions.allow missing %s: %s", workerToolPermission, sData)
+	}
+
 	// 2a. UserPromptSubmit health-check hook wired (zero-token worker liveness probe)
 	if !strings.Contains(string(sData), "UserPromptSubmit") ||
 		!strings.Contains(string(sData), "rig-move-llm hook user-prompt") {
@@ -117,6 +122,72 @@ func TestInitAutoWire(t *testing.T) {
 		if _, ok := s2["outputStyle"]; ok {
 			t.Error("outputStyle not stripped by uninstall")
 		}
+		if _, ok := s2["permissions"]; ok {
+			t.Errorf("permissions grant not stripped by uninstall: %s", sData2)
+		}
+	}
+}
+
+// permissionAllowed reports whether settings carries rule in permissions.allow.
+func permissionAllowed(settings map[string]any, rule string) bool {
+	perms, _ := settings["permissions"].(map[string]any)
+	allow, _ := perms["allow"].([]any)
+	for _, v := range allow {
+		if v == rule {
+			return true
+		}
+	}
+	return false
+}
+
+// TestWireSettingsPreservesUserPermissions verifies the #6 grant merges into an
+// existing permissions block instead of clobbering it, is idempotent, and that
+// uninstall strips only our rule.
+func TestWireSettingsPreservesUserPermissions(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	seed := `{"permissions":{"allow":["Bash(ls:*)"],"deny":["WebFetch"]}}`
+	if err := os.WriteFile(path, []byte(seed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 2; i++ { // twice: the grant must not duplicate
+		if err := wireSettings(path, filepath.Join(dir, "bak.json"), "", false); err != nil {
+			t.Fatalf("wireSettings: %v", err)
+		}
+	}
+	data, _ := os.ReadFile(path)
+	var settings map[string]any
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatal(err)
+	}
+	if !permissionAllowed(settings, workerToolPermission) {
+		t.Errorf("worker grant missing: %s", data)
+	}
+	if !permissionAllowed(settings, "Bash(ls:*)") {
+		t.Errorf("user allow rule lost: %s", data)
+	}
+	perms := settings["permissions"].(map[string]any)
+	if allow := perms["allow"].([]any); len(allow) != 2 {
+		t.Errorf("grant not idempotent, allow=%v", allow)
+	}
+	if _, ok := perms["deny"]; !ok {
+		t.Errorf("user deny rule lost: %s", data)
+	}
+
+	if err := stripRigHooks(path); err != nil {
+		t.Fatalf("stripRigHooks: %v", err)
+	}
+	data2, _ := os.ReadFile(path)
+	var s2 map[string]any
+	if err := json.Unmarshal(data2, &s2); err != nil {
+		t.Fatal(err)
+	}
+	if permissionAllowed(s2, workerToolPermission) {
+		t.Errorf("worker grant not stripped: %s", data2)
+	}
+	if !permissionAllowed(s2, "Bash(ls:*)") {
+		t.Errorf("uninstall removed user allow rule: %s", data2)
 	}
 }
 

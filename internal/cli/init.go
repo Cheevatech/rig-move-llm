@@ -391,6 +391,11 @@ func modelNote(model string) string {
 	return " model=" + model
 }
 
+// workerToolPermission is the permission rule pre-granting the worker MCP tool.
+// enableAllProjectMcpServers covers server TRUST only; without this grant a
+// headless `claude -p` burns the run asking a human to click allow (#6).
+const workerToolPermission = "mcp__worker__implement"
+
 // wireSettings merges the rig-move-llm hooks into an existing (or new) Claude Code
 // settings.json, preserving unrelated keys. The original file is backed up once to
 // backupPath so `uninstall` can restore it verbatim.
@@ -414,6 +419,27 @@ func wireSettings(path, backupPath, gateMode string, npx bool) error {
 		}
 		return "rig-move-llm hook " + strings.Join(args, " ")
 	}
+
+	// Trust alone is not permission (#6): a headless -p run still stalls on the
+	// tool-permission dialog for the worker tool. Grant it here, preserving any
+	// user-managed permissions around it.
+	perms, _ := settings["permissions"].(map[string]any)
+	if perms == nil {
+		perms = map[string]any{}
+	}
+	allow, _ := perms["allow"].([]any)
+	granted := false
+	for _, v := range allow {
+		if v == workerToolPermission {
+			granted = true
+			break
+		}
+	}
+	if !granted {
+		allow = append(allow, workerToolPermission)
+	}
+	perms["allow"] = allow
+	settings["permissions"] = perms
 
 	// Activate the output style — the system-prompt-tier workflow lever (P10).
 	// hard gate = terse plan→delegate→review; soft gate (map6) = explore-first:

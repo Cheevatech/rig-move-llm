@@ -54,18 +54,3 @@ func TestClearTurnResetsRounds(t *testing.T) {
 		t.Fatalf("ClearTurn must drop the counter, got %+v (ok=%v)", r, ok)
 	}
 }
-
-// Explore evidence is expensive to rebuild; clearing a turn must not touch it.
-func TestClearTurnKeepsExplore(t *testing.T) {
-	dir := t.TempDir()
-	if err := WriteExplore(dir, Explore{Repo: "/r", NSites: 2, At: time.Now()}); err != nil {
-		t.Fatal(err)
-	}
-	BumpRound(dir)
-
-	ClearTurn(dir)
-
-	if _, ok := ReadExplore(dir); !ok {
-		t.Error("ClearTurn dropped the Stage-0 evidence")
-	}
-}

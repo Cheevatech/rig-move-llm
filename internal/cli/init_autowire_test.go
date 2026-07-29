@@ -98,6 +98,19 @@ func TestInitAutoWire(t *testing.T) {
 		t.Error("CLAUDE.md missing delegate tool name")
 	}
 
+	// Inject a user hook to verify uninstall preserves it
+	{
+		sPath := filepath.Join(proj, ".claude", "settings.json")
+		sRaw, _ := os.ReadFile(sPath)
+		var sInject map[string]any
+		json.Unmarshal(sRaw, &sInject)
+		hooksInject := sInject["hooks"].(map[string]any)
+		userHook := map[string]any{"hooks": []any{map[string]any{"command": "echo user-health-check"}}}
+		hooksInject["UserPromptSubmit"] = append(hooksInject["UserPromptSubmit"].([]any), userHook)
+		sOut, _ := json.MarshalIndent(sInject, "", "  ")
+		os.WriteFile(sPath, append(sOut, '\n'), 0o644)
+	}
+
 	// uninstall reverses all three
 	if rc := cmdUninstall(nil); rc != 0 {
 		t.Fatalf("cmdUninstall rc=%d", rc)
@@ -124,6 +137,52 @@ func TestInitAutoWire(t *testing.T) {
 		}
 		if _, ok := s2["permissions"]; ok {
 			t.Errorf("permissions grant not stripped by uninstall: %s", sData2)
+		}
+		// No rig hook remains in any phase
+		if hooks2, ok := s2["hooks"].(map[string]any); ok {
+			for phaseName, phaseEntries := range hooks2 {
+				for _, entry := range phaseEntries.([]any) {
+					if eMap, ok := entry.(map[string]any); ok {
+						if inner, ok := eMap["hooks"].([]any); ok {
+							for _, h := range inner {
+								if hm, ok := h.(map[string]any); ok {
+									if cmd, ok := hm["command"].(string); ok {
+										if strings.Contains(cmd, "rig-move-llm") {
+											t.Errorf("rig hook still present in phase %s: %s", phaseName, cmd)
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		// User-added hook survives uninstall
+		if hooks2, ok := s2["hooks"].(map[string]any); ok {
+			found := false
+			if phaseEntries, ok := hooks2["UserPromptSubmit"].([]any); ok {
+				for _, entry := range phaseEntries {
+					if eMap, ok := entry.(map[string]any); ok {
+						if inner, ok := eMap["hooks"].([]any); ok {
+							for _, h := range inner {
+								if hm, ok := h.(map[string]any); ok {
+									if cmd, ok := hm["command"].(string); ok {
+										if cmd == "echo user-health-check" {
+											found = true
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+			if !found {
+				t.Errorf("user hook not preserved after uninstall: %s", sData2)
+			}
+		} else {
+			t.Error("user hook not preserved: hooks map missing after uninstall")
 		}
 	}
 }
@@ -238,9 +297,9 @@ func TestInitNpxHookForm(t *testing.T) {
 
 		cmds := readHookCommands(proj)
 		want := map[string]string{
-			"PreToolUse":     "rig-move-llm hook pre-tool",
-			"PostToolUse":    "rig-move-llm hook post-tool",
-			"SessionStart":   "rig-move-llm hook session-start",
+			"PreToolUse":       "rig-move-llm hook pre-tool",
+			"PostToolUse":      "rig-move-llm hook post-tool",
+			"SessionStart":     "rig-move-llm hook session-start",
 			"UserPromptSubmit": "rig-move-llm hook user-prompt",
 		}
 		for name, expected := range want {
@@ -268,9 +327,9 @@ func TestInitNpxHookForm(t *testing.T) {
 
 		cmds := readHookCommands(proj)
 		want := map[string]string{
-			"PreToolUse":     "npx -y rig-move-llm hook pre-tool",
-			"PostToolUse":    "npx -y rig-move-llm hook post-tool",
-			"SessionStart":   "npx -y rig-move-llm hook session-start",
+			"PreToolUse":       "npx -y rig-move-llm hook pre-tool",
+			"PostToolUse":      "npx -y rig-move-llm hook post-tool",
+			"SessionStart":     "npx -y rig-move-llm hook session-start",
 			"UserPromptSubmit": "npx -y rig-move-llm hook user-prompt",
 		}
 		for name, expected := range want {

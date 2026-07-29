@@ -126,8 +126,8 @@ func stripRigHooks(path string) error {
 		}
 		return os.WriteFile(path, append(out, '\n'), 0o644)
 	}
-	for _, phase := range []string{"PreToolUse", "PostToolUse", "SessionStart"} {
-		entries, ok := hooks[phase].([]any)
+	for phase, entriesAny := range hooks {
+		entries, ok := entriesAny.([]any)
 		if !ok {
 			continue
 		}
@@ -153,7 +153,7 @@ func stripRigHooks(path string) error {
 	return os.WriteFile(path, append(out, '\n'), 0o644)
 }
 
-// mentionsRig reports whether a PreToolUse/PostToolUse entry contains a command
+// mentionsRig reports whether a hook entry contains a command
 // referencing rig-move-llm (i.e. one we installed).
 func mentionsRig(entry any) bool {
 	m, ok := entry.(map[string]any)

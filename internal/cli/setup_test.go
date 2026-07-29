@@ -70,6 +70,19 @@ func TestApplyInitSkippedWorkerIsInert(t *testing.T) {
 // TestSessionStartMaterializes asserts the SessionStart hook creates a per-project
 // .rig-move-llm carrying the global settings, with the API key inherited (not
 // duplicated) and the folder git-ignored — mirroring Serena's .serena.
+// TestCCDefaultBaseIsOwnServeRoute covers #13 (map13 A4 MAJOR-2): the wizard's
+// suggested cc base URL is this install's own /r/worker route, so choosing the
+// cc engine is no longer a dead end for users without an external
+// Anthropic-format endpoint.
+func TestCCDefaultBaseIsOwnServeRoute(t *testing.T) {
+	if got := ccDefaultBase("4010"); got != "http://localhost:4010/r/worker" {
+		t.Errorf("ccDefaultBase(4010) = %q", got)
+	}
+	if got := ccDefaultBase(""); got != "http://localhost:4000/r/worker" {
+		t.Errorf("ccDefaultBase(\"\") = %q", got)
+	}
+}
+
 func TestSessionStartMaterializes(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

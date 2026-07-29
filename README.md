@@ -109,7 +109,7 @@ shape either way.
 
 ```sh
 RIG_WORKER_ENGINE=                   # auto (default): cc when RIG_CC_BASE_URL is set, loop otherwise | cc | loop
-RIG_CC_BASE_URL=http://localhost:4001  # REQUIRED for cc: Anthropic-format endpoint for the worker model
+RIG_CC_BASE_URL=http://127.0.0.1:4000/r/worker  # REQUIRED for cc: Anthropic-format endpoint (rig serves one — see below)
 RIG_CC_MODEL=haiku                   # model name the subprocess runs as (default haiku)
 ```
 
@@ -117,6 +117,20 @@ RIG_CC_MODEL=haiku                   # model name the subprocess runs as (defaul
 catch-rate, a fresh repo, and a second endpoint): configuring `RIG_CC_BASE_URL` is the opt-in —
 the cc engine runs whenever it is set. An install without it keeps the loop, and
 `RIG_WORKER_ENGINE=loop` forces the loop even with a base URL configured.
+
+**Where do you get an Anthropic-format endpoint?** You already have one: the rig proxy itself.
+`rig-move-llm serve` translates Anthropic `/v1/messages` (streaming included) to your
+OpenAI-compatible `WORKER_API_BASE` / `WORKER_MODEL` on its **`/r/worker`** route, so the cc
+engine runs entirely in-product — no extra translator to install:
+
+```sh
+rig-move-llm serve --port 4000                    # the proxy the wizard already runs
+RIG_CC_BASE_URL=http://127.0.0.1:4000/r/worker    # cc subprocess -> rig -> your OpenAI endpoint
+```
+
+The subprocess traffic lands in the worker ledger like any other worker call. Any other
+Anthropic-format endpoint (e.g. an external LiteLLM translation layer, or a provider that
+speaks the Anthropic API natively) works the same way.
 
 `RIG_CC_BASE_URL` is a hard requirement, not a default: with it empty the engine **refuses to
 launch**, because the subprocess would otherwise bill its inference to your paid Anthropic account —

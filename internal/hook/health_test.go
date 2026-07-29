@@ -43,7 +43,7 @@ func TestProbe(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer up.Close()
-	if !Probe(up.URL, time.Second) {
+	if !Probe(up.URL, time.Second, "") {
 		t.Error("Probe on a 200 server = false, want true")
 	}
 
@@ -51,12 +51,12 @@ func TestProbe(t *testing.T) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	defer down.Close()
-	if Probe(down.URL, time.Second) {
+	if Probe(down.URL, time.Second, "") {
 		t.Error("Probe on a 503 server = true, want false")
 	}
 
 	// Unreachable endpoint (nothing listening) -> not healthy, not a panic.
-	if Probe("http://127.0.0.1:1/nope", 200*time.Millisecond) {
+	if Probe("http://127.0.0.1:1/nope", 200*time.Millisecond, "") {
 		t.Error("Probe on an unreachable endpoint = true, want false")
 	}
 }

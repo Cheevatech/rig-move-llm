@@ -55,21 +55,41 @@ func HealthURL(workerAPIBase, path string) string {
 	return u.Scheme + "://" + u.Host + path
 }
 
-// Probe issues a GET to url and reports whether the endpoint answered with a 2xx.
-// Any transport error or non-2xx status is "not healthy" (caller degrades).
-func Probe(u string, timeout time.Duration) bool {
+// Probe issues a GET to u and reports whether the worker endpoint is ALIVE. key,
+// when non-empty, is sent as a bearer token — a keyed endpoint (llama-swap, a
+// keyed vLLM, a hosted provider) must not look dead just because the probe was
+// anonymous.
+//
+// The question this answers is "is there a worker to delegate to", NOT "is this
+// request authorized" — and the two used to be conflated (#22): a bare GET
+// against a keyed endpoint returns 401, the endpoint was classified with
+// connection-refused, and the hybrid silently disabled itself for the whole
+// session (no force-delegate, no gate, no delegation budget) while the worker
+// leg was working fine. So:
+//
+//   - transport error (refused, DNS, timeout) -> dead. Nothing is listening.
+//   - 5xx -> dead. Something answers, but it is the proxy/loader failing, which
+//     is what a down upstream looks like through llama-swap and friends.
+//   - anything else, 4xx included -> ALIVE. A 401/403 is the endpoint telling us
+//     it is there; a 404 means the probe path is wrong, not that the host is
+//     gone. A misconfigured key is a config problem to surface, never a reason
+//     to turn the product off behind the user's back.
+func Probe(u string, timeout time.Duration, key string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return false
 	}
+	if key = strings.TrimSpace(key); key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return false
 	}
 	defer resp.Body.Close()
-	return resp.StatusCode/100 == 2
+	return resp.StatusCode/100 != 5
 }
 
 // WriteHealthMarker atomically persists a probe result (temp file + rename).

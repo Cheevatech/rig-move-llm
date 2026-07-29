@@ -51,7 +51,7 @@ func cmdUserPrompt(r io.Reader, w io.Writer) int {
 		return 0
 	}
 
-	healthy := hook.Probe(u, time.Duration(cfg.HealthTimeoutMs)*time.Millisecond)
+	healthy := hook.Probe(u, time.Duration(cfg.HealthTimeoutMs)*time.Millisecond, cfg.WorkerAPIKey)
 	hook.WriteHealthMarker(marker, healthy, now)
 	if !healthy {
 		emitFallback(w, u)

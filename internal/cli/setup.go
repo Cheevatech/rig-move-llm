@@ -70,10 +70,16 @@ func cmdSetup(args []string) int {
 			{Label: "cc", Description: "native `claude -p` subprocess on your endpoint (experimental; needs the claude CLI + an Anthropic-format endpoint)"},
 		}, 0)
 		if eng == 1 {
-			base := tui.Prompt("cc base URL (REQUIRED for cc)",
-				"Anthropic-format endpoint for the worker model, e.g. http://localhost:4001 — Enter to keep the loop engine", "")
-			if base == "" {
-				fmt.Println("  no cc base URL — keeping the loop engine (the cc engine refuses to run without one; it would bill the worker leg to your paid account).")
+			// The Anthropic-format endpoint the cc engine needs ships in the product
+			// itself: `rig-move-llm serve` exposes /r/worker, translating Anthropic
+			// /v1/messages to the worker endpoint configured above (#13 / map13 A4
+			// MAJOR-2 — an empty default here was a dead end for anyone who did not
+			// already know that).
+			base := tui.Prompt("cc base URL",
+				"Anthropic-format endpoint for the worker model. Enter = rig's own serve route (run `rig-move-llm serve` before launching claude) — it translates to the worker endpoint above. Type `loop` to keep the loop engine",
+				ccDefaultBase(o.port))
+			if base == "" || strings.EqualFold(base, "loop") {
+				fmt.Println("  keeping the loop engine (the cc engine refuses to run without a base URL; it would bill the worker leg to your paid account).")
 			} else {
 				o.workerEngine = "cc"
 				o.ccBase = base
@@ -110,6 +116,15 @@ func cmdSetup(args []string) int {
 	fmt.Println()
 	fmt.Println("Done. Just run:  claude")
 	return 0
+}
+
+// ccDefaultBase is the wizard's suggested RIG_CC_BASE_URL: this install's own
+// serve route, which needs no external Anthropic-format dependency.
+func ccDefaultBase(port string) string {
+	if port == "" {
+		port = "4000"
+	}
+	return "http://localhost:" + port + "/r/worker"
 }
 
 // pickBackend presents the known worker backends as an explained menu, defaulting to

@@ -152,6 +152,25 @@ func ccProofComplete(absRepo string, p *ccProof) bool {
 	return os.IsNotExist(err)
 }
 
+// ccChildEnv builds the subprocess environment: the parent env minus every
+// RIG_* variable, plus the worker-leg Anthropic wiring. Rig config must not
+// leak into the worker's shell (#10) — a target repo whose tests read RIG_CC_*
+// would fail for reasons unrelated to the change under test. The engine reads
+// its own RIG_CC_* knobs in-process before spawning, so scrubbing costs nothing.
+func ccChildEnv(base string) []string {
+	parent := os.Environ()
+	env := make([]string, 0, len(parent)+2)
+	for _, kv := range parent {
+		if strings.HasPrefix(kv, "RIG_") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(env,
+		"ANTHROPIC_BASE_URL="+base,
+		"ANTHROPIC_API_KEY="+ccAPIKey())
+}
+
 // runCCOnce spawns one `claude -p` subprocess and parses its stream into res,
 // accumulating proof evidence. firstRun gates the skew diagnostics and the
 // prompt-archive mode (write vs append).
@@ -203,9 +222,7 @@ func (e *Engine) runCCOnce(ctx context.Context, bin, base, absRepo, user string,
 	// OAuth/keychain credentials entirely (auth hygiene — the worker leg must not
 	// ride the subscription identity), and it satisfies CC's headless auth check.
 	// The local endpoint does not validate it (proven by the smoke shot).
-	cmd.Env = append(os.Environ(),
-		"ANTHROPIC_BASE_URL="+base,
-		"ANTHROPIC_API_KEY="+ccAPIKey())
+	cmd.Env = ccChildEnv(base)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {

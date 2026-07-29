@@ -136,6 +136,70 @@ func TestCCImplementHappyPath(t *testing.T) {
 	}
 }
 
+// TestCCChildEnvScrubsRigConfig covers #10: rig's own RIG_* config must not
+// leak into the worker subprocess (a target repo's tests reading RIG_CC_* would
+// fail for reasons unrelated to the change under test).
+func TestCCChildEnvScrubsRigConfig(t *testing.T) {
+	t.Setenv("RIG_CC_BASE_URL", "http://leak:1")
+	t.Setenv("RIG_WORKER_ENGINE", "cc")
+	t.Setenv("CC_KEEP_ME", "1")
+
+	env := ccChildEnv("http://worker-leg")
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "RIG_") {
+			t.Errorf("RIG_ var leaked into child env: %s", kv)
+		}
+	}
+	joined := "\n" + strings.Join(env, "\n") + "\n"
+	for _, want := range []string{
+		"\nCC_KEEP_ME=1\n", // non-rig env passes through
+		"\nANTHROPIC_BASE_URL=http://worker-leg\n",
+		"\nANTHROPIC_API_KEY=" + ccAPIKey() + "\n",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("child env missing %q", strings.TrimSpace(want))
+		}
+	}
+}
+
+// TestCCSubprocessSeesNoRigEnv proves the scrub end to end: a fake claude dumps
+// its full environment and no RIG_ variable reaches it.
+func TestCCSubprocessSeesNoRigEnv(t *testing.T) {
+	repo := ccTestRepo(t)
+	outDir := t.TempDir()
+	streamFile := filepath.Join(outDir, "stream.jsonl")
+	if err := os.WriteFile(streamFile, []byte(ccHappyStream), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(t.TempDir(), "fake-claude")
+	script := "#!/bin/bash\n" +
+		"env > '" + outDir + "/env-full.txt'\n" +
+		"cat '" + streamFile + "'\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ccEnv(t, bin)
+	t.Setenv("RIG_CC_MODEL", "haiku")
+
+	e := NewEngine(config.Config{})
+	if res := e.Implement(context.Background(), repo, "fix the bug", ""); res.Err != "" {
+		t.Fatalf("implement err=%q", res.Err)
+	}
+
+	envFull, err := os.ReadFile(filepath.Join(outDir, "env-full.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(envFull), "\n") {
+		if strings.HasPrefix(line, "RIG_") {
+			t.Errorf("subprocess saw rig config: %s", line)
+		}
+	}
+	if !strings.Contains(string(envFull), "ANTHROPIC_BASE_URL=http://127.0.0.1:9/worker-leg") {
+		t.Errorf("subprocess missing worker-leg base URL:\n%s", envFull)
+	}
+}
+
 func TestCCRefusesWithoutBaseURL(t *testing.T) {
 	repo := ccTestRepo(t)
 	bin, _ := ccFakeBin(t, t.TempDir(), ccHappyStream)

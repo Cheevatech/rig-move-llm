@@ -47,6 +47,15 @@ func cmdUninstall(args []string) int {
 		unregisterUserMCP()
 	}
 
+	// Reverse a workspace-trust grant, and only one rig made (trust.go keeps the
+	// ownership marker); a trust the human accepted themselves is not ours to
+	// withdraw.
+	if canon, err := config.CanonicalPath("."); err == nil {
+		if revokeWorkspaceTrust(canon, dataDir) {
+			fmt.Println("revoked the workspace trust rig granted for", canon)
+		}
+	}
+
 	settingsPath := filepath.Join(claudeDir, "settings.json")
 	backupPath := filepath.Join(dataDir, "settings.json.bak")
 	if fileExists(backupPath) {

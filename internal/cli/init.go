@@ -31,6 +31,10 @@ type initOpts struct {
 	service      bool
 	force        bool
 	noDetect     bool
+	// trustWorkspace grants Claude Code's workspace trust for this directory (see
+	// trust.go). It is never implied: only --trust-workspace, RIG_INIT_TRUST=1, or
+	// the wizard's own question set it.
+	trustWorkspace bool
 }
 
 // cmdInit bootstraps a scope: it writes the config file and wires Claude Code
@@ -53,7 +57,13 @@ func cmdInit(args []string) int {
 	force := fs.Bool("force", false, "overwrite an existing config file")
 	noDetect := fs.Bool("no-detect", false, "skip probing for a local worker endpoint")
 	svc := fs.Bool("service", false, "install an OS service so the proxy survives reboots (requires --global)")
+	trust := fs.Bool("trust-workspace", false, "accept Claude Code's workspace trust for this directory, so a headless `claude -p` run honours the permissions init writes (equivalent to accepting the trust dialog here; `uninstall` reverts it)")
 	_ = fs.Parse(args)
+
+	// Same grant, for a non-interactive installer that cannot pass flags.
+	if os.Getenv("RIG_INIT_TRUST") == "1" {
+		*trust = true
+	}
 
 	if *svc && !*global {
 		fmt.Fprintln(os.Stderr, "init: --service requires --global (the daemon reads ~/.rig-move-llm/config.env, not a project dir)")
@@ -93,6 +103,7 @@ func cmdInit(args []string) int {
 		// A worker endpoint was configured -> enable; otherwise stay inert.
 		enabled:   *workerBase != "" || *backend != "",
 		npxWorker: *npx, service: *svc, force: *force, noDetect: *noDetect,
+		trustWorkspace: *trust,
 	})
 }
 
@@ -157,6 +168,26 @@ func applyInit(o initOpts) int {
 		return 1
 	}
 	fmt.Println("wired hooks + permissions in", filepath.Join(claudeDir, "settings.json"))
+
+	// 2b. Workspace trust (#16). Those permissions are ignored outright until
+	// Claude Code trusts this directory, so either grant it — on an explicit
+	// request only, see trust.go — or say plainly that the headless path is still
+	// broken and how to fix it.
+	if canon, err := config.CanonicalPath("."); err == nil {
+		if o.trustWorkspace {
+			already, terr := grantWorkspaceTrust(canon, dataDir)
+			switch {
+			case terr != nil:
+				fmt.Fprintln(os.Stderr, "init: workspace trust:", terr)
+			case already:
+				fmt.Println("workspace already trusted by Claude Code:", canon)
+			default:
+				fmt.Printf("granted Claude Code workspace trust for %s in %s (uninstall reverts it)\n", canon, userClaudeJSON())
+			}
+		} else if notice := untrustedWorkspaceNotice(canon); notice != "" {
+			fmt.Println(notice)
+		}
+	}
 
 	// 3. MCP config for `run --mcp-config` back-compat: the same worker (+optional
 	// toolbelt) served as a one-off file. Bare `claude` ignores this; it reads the

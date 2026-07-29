@@ -206,7 +206,8 @@ agent's output small, plus `.rig-move-llm/config.env`.
   `.rig-move-llm/config.env` only to override one setting there (e.g. `ENABLED=false` to turn the
   hybrid off in that project alone).
 - **Project:** wires only this directory (a project-root `.mcp.json`, pre-approved by
-  `enableAllProjectMcpServers` so headless `-p` never hangs on the trust prompt).
+  `enableAllProjectMcpServers` so the worker server loads without a prompt — see
+  [Headless](#headless-claude--p) for the third trust layer a never-opened project still needs).
 
 **On / off switch.** `ENABLED` in `config.env` is the master toggle: `false` (the default when you
 skip the worker) means the hook passes every tool through and Claude Code behaves normally; set a
@@ -217,12 +218,56 @@ scope wins, the resolved worker endpoint, and the on/off state — and `rig-move
 opens the target scope's `config.env` in your `$EDITOR`. `rig-move-llm run
 -- claude` remains available when you also want the proxy's observability on the main leg. Reverse
 everything with `rig-move-llm uninstall` (restores your `settings.json` verbatim; strips the
-user-scope worker registration). `rig-move-llm init [--global] [--npx] [flags]` is the
+user-scope worker registration; reverts a workspace-trust grant rig made).
+`rig-move-llm init [--global] [--npx] [flags]` is the
 non-interactive form for scripts (`--npx` spawns the worker via `npx -y rig-move-llm worker`, no
 global binary needed for that leg).
 
 The npm package ships a single prebuilt static binary per platform via
 `optionalDependencies` (the esbuild/biome pattern — no postinstall download).
+
+### Headless (`claude -p`)
+
+An unattended run has **three** separate gates in Claude Code, and rig's wiring covers them
+in two steps:
+
+| layer | what it gates | how it is granted |
+|---|---|---|
+| server trust | may the worker MCP server load at all | `enableAllProjectMcpServers`, written by `init` |
+| tool permission | may the agent call `mcp__worker__implement` without asking | `permissions.allow`, written by `init` |
+| **workspace trust** | is this directory trusted at all | the trust dialog — **or** `init --trust-workspace` |
+
+The third one is the trap: on a project that has never been opened interactively, Claude Code
+**discards the `permissions.allow` entry entirely** (`Ignoring 1 permissions.allow entry … this
+workspace has not been trusted`), so a headless run stops to ask a human and the run is wasted.
+`init` prints a notice when it sees this, with both ways out:
+
+```sh
+claude                                   # once, interactively — accept the trust dialog
+rig-move-llm init --trust-workspace      # or grant it directly (RIG_INIT_TRUST=1 for scripts)
+```
+
+`--trust-workspace` sets `projects["<this dir>"].hasTrustDialogAccepted` in your `~/.claude.json` —
+the same flag the dialog sets. It is **never** implied by a plain `init`: that dialog is Claude
+Code's safeguard against a repo you have not looked at yet, so switching it off stays an explicit
+act. The wizard asks the same question interactively, and `rig-move-llm uninstall` reverts a grant
+**rig** made — never one you accepted yourself.
+
+### Guards: what bounds one delegation
+
+A delegated round is bounded on both axes, so a worker that stops making progress fails loudly
+instead of hanging or looping:
+
+| knob | default | what it does |
+|---|---|---|
+| `RIG_CC_STALL_TIMEOUT` | `600s` | kills a cc-engine round whose stream has gone completely silent (a live worker emits an event per tool call; the longest honest silence is a Bash call, which Claude Code caps around 10 minutes). `0` disables |
+| `RIG_WORKER_RUN_TIMEOUT` | `1500s` | the wall for one `implement` call. It must stay **below** the calling client's MCP watchdog (Claude Code aborts a silent tool call at 1800s) or the round dies without rig getting to explain why |
+| `RIG_MAX_DELEGATE_ROUNDS` | `3` | how many times the main agent may delegate within **one turn**. `0` disables |
+
+A killed round returns `stopped: "timeout"` with what the worker was last seen doing and any
+partial diff, and the output style tells the main agent not to re-send the same spec. When the
+round budget is spent the hook denies the call and the agent reports to you instead — your next
+message resets the budget, so "just keep going" is a reply, not a flag.
 
 ### Permissions posture (headless)
 
@@ -245,8 +290,10 @@ rig-move-llm disable [--local]               turn offload OFF (Claude Code runs 
 rig-move-llm config  [--local] [--open]      show the effective config / open it in $EDITOR
 rig-move-llm serve [--port N] [--status]     run the routing proxy / report state
 rig-move-llm hook  pre-tool|post-tool|session-start  Claude Code hooks (force-delegate + gate + auto-materialize)
-rig-move-llm init  [--global] [--npx] [--service] [flags]  non-interactive bootstrap
-                                             (--service: OS-supervised, survives reboots)
+rig-move-llm init  [--global] [--npx] [--service] [--trust-workspace] [flags]
+                                             non-interactive bootstrap
+                                             (--service: OS-supervised, survives reboots;
+                                              --trust-workspace: accept CC's workspace trust here)
 rig-move-llm uninstall [--global] [--purge]  reverse init for a scope (incl. OS service)
 rig-move-llm run   [--] <command...>         launch a command with the proxy wired in
 rig-move-llm stats [--reset|--history]       token accounting / savings

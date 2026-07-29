@@ -108,6 +108,19 @@ func cmdSetup(args []string) int {
 		}
 	}
 
+	// 3b. Workspace trust (#16). Claude Code ignores the permissions init writes
+	//     until this directory is trusted, so a headless run here stops to ask a
+	//     human. Rig can set the same flag the trust dialog sets — but only if the
+	//     person in front of it says so, because that dialog is CC's safeguard
+	//     against a repo you have not looked at yet, not rig's to switch off.
+	if canon, err := config.CanonicalPath("."); err == nil && !workspaceTrusted(canon) {
+		fmt.Println()
+		o.trustWorkspace = tui.Confirm(
+			"Trust this directory for Claude Code? (same as accepting the trust dialog here — without it a headless `claude -p` run ignores the permissions and stops to ask)",
+			"set hasTrustDialogAccepted for "+canon+" (uninstall reverts it)",
+			"leave it — I'll accept the dialog myself the first time I run claude here", true)
+	}
+
 	// 4. Wire Claude Code.
 	fmt.Println()
 	if rc := applyInit(o); rc != 0 {

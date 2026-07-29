@@ -49,12 +49,36 @@ func ccEnabled() bool {
 // clause is the B5 point: rounds that used to bounce back to MAIN happen here.
 const ccSystemPrompt = `You are a code-fixing worker operating directly on a repository checkout.
 Resolve the task by editing files and verifying with the repro/test command in the task.
-Workflow: read the relevant code, make the MINIMAL edit that fixes it, run the failing test to
-verify, then run the full test file(s) covering the code you changed and resolve any fallout you
-caused. Iterate yourself until the fix is verified — do not stop at an unverified attempt.
-When verified, STOP and reply with a one-paragraph summary of what you changed and why.
+Workflow — proof-of-flip is MANDATORY, in this order:
+1. Before touching source, write a regression test file named rig_proof_test.py at the repo
+   root that asserts the EXPECTED behaviour from the task. When the task states an expected
+   value or output, assert it concretely — "does not crash" alone is not a proof then.
+2. Run it with the repo's test runner (e.g. ./.venv/bin/python -m pytest -q rig_proof_test.py).
+   It MUST FAIL. If it passes, it does not capture the bug — rewrite it until it fails.
+3. Make the MINIMAL source edit that fixes the bug.
+4. Rerun the SAME test command byte-for-byte. It MUST PASS now.
+5. Run the full test file(s) covering the code you changed and resolve any fallout you caused.
+6. Delete rig_proof_test.py so the tree carries the source fix only.
+Iterate yourself until the fix is verified — do not stop at an unverified attempt.
+When verified, STOP and reply with a one-paragraph summary of what you changed and why, ending
+with the line: PROOF: <the exact test command you ran red, then green>.
 Rules: do not ask questions — act. Do not touch files under .gate/ or .gate.frozen/. Do not
 refactor, rename, or "improve" anything you were not asked to change. Do not commit.`
+
+// ccProofRetryInstr is the single worker-side retry (P5 fixup shape: one shot,
+// decided by the engine, MAIN never re-enters the loop). The fix is already in
+// the tree, so red needs a temporary revert.
+const ccProofRetryInstr = `PROOF MISSING: a previous session already applied a fix to this
+working tree but produced no red->green proof-of-flip evidence. Complete the proof now WITHOUT
+redoing the fix:
+1. Save the fix:  git diff > /tmp/rig_fix.patch
+2. Revert:        git checkout -- .
+3. Write rig_proof_test.py at the repo root asserting the EXPECTED behaviour from the task,
+   run it with the repo's test runner (e.g. ./.venv/bin/python -m pytest -q rig_proof_test.py)
+   — it MUST FAIL (red).
+4. Re-apply:      git apply /tmp/rig_fix.patch
+5. Rerun the SAME test command byte-for-byte — it MUST PASS (green).
+6. Delete rig_proof_test.py, then reply with a short summary ending with the PROOF line.`
 
 // implementCC runs one implement call as a `claude -p` subprocess in the repo,
 // parses its stream-json output, and returns the same Result shape the 3-tool
@@ -79,6 +103,59 @@ func (e *Engine) implementCC(ctx context.Context, absRepo, task, gateDir string)
 		user += "\n\n(A frozen test contract exists under " + gateDir + " — do not modify it; make the product code pass it.)"
 	}
 
+	// The proof must be demonstrated WITHIN one worker session (red, then green,
+	// same command) — evidence never pairs across sessions, so a stale red from
+	// an earlier spawn cannot legitimize a later lone green.
+	proof := &ccProof{}
+	sawResult := e.runCCOnce(ctx, bin, base, absRepo, user, &res, proof, true)
+
+	// V6 proof-of-flip: when the worker claims done without red->green evidence,
+	// the engine grants exactly ONE worker-side retry (P5 fixup shape). MAIN is
+	// never pulled back in — the whole cycle stays on the free leg.
+	if sawResult && res.Stopped == "done" && !ccProofComplete(absRepo, proof) {
+		logStderr("cc: done without proof-of-flip — one worker-side retry")
+		var res2 Result
+		retryProof := &ccProof{}
+		if e.runCCOnce(ctx, bin, base, absRepo, user+"\n\n"+ccProofRetryInstr, &res2, retryProof, false) {
+			res.Iterations += res2.Iterations
+			res.InputTokens += res2.InputTokens
+			res.OutputTokens += res2.OutputTokens
+			if res2.LastTest != "" {
+				res.LastTest = res2.LastTest
+			}
+		}
+		if retryProof.Flip {
+			proof = retryProof
+		}
+	}
+	if sawResult && res.Stopped == "done" && !ccProofComplete(absRepo, proof) {
+		// Honest, non-blocking: the fix ships to MAIN, labelled. The output style
+		// forbids closing green on this marker; nothing escalates automatically.
+		res.Summary += "\n\nUNPROVEN: no red->green proof-of-flip evidence in the worker stream — treat this fix as unverified."
+	}
+	// A leftover proof test is worker garbage either way — it must never leak
+	// into the tree a later run (or the user) sees.
+	os.Remove(absRepo + string(os.PathSeparator) + ccProofFile)
+
+	res.Diff, res.FilesChanged = e.collectDiff(ctx, absRepo)
+	return res
+}
+
+// ccProofComplete is the pass condition frozen in V6: a red->green flip seen in
+// the stream AND no proof file left on disk (checked by the engine itself, not
+// believed from prose).
+func ccProofComplete(absRepo string, p *ccProof) bool {
+	if p == nil || !p.Flip {
+		return false
+	}
+	_, err := os.Stat(absRepo + string(os.PathSeparator) + ccProofFile)
+	return os.IsNotExist(err)
+}
+
+// runCCOnce spawns one `claude -p` subprocess and parses its stream into res,
+// accumulating proof evidence. firstRun gates the skew diagnostics and the
+// prompt-archive mode (write vs append).
+func (e *Engine) runCCOnce(ctx context.Context, bin, base, absRepo, user string, res *Result, proof *ccProof, firstRun bool) bool {
 	args := []string{
 		"-p", user,
 		"--output-format", "stream-json", "--verbose",
@@ -102,10 +179,20 @@ func (e *Engine) implementCC(ctx context.Context, absRepo, task, gateDir string)
 	args = append(args, "--append-system-prompt", ccSystemPrompt)
 
 	// `claude -p` does not echo its prompt into the stream (measured: D4
-	// ADDENDUM), so the harness archives what was actually fired.
+	// ADDENDUM), so the harness archives what was actually fired. The proof
+	// retry appends so both prompts survive.
 	if p := strings.TrimSpace(os.Getenv("RIG_CC_PROMPT_ARCHIVE")); p != "" {
 		archive := "BIN: " + bin + "\nARGS: " + strings.Join(args[2:], " ") + "\n--- PROMPT ---\n" + user + "\n--- SYSTEM (appended) ---\n" + ccSystemPrompt + "\n"
-		if err := os.WriteFile(p, []byte(archive), 0o644); err != nil {
+		var err error
+		if firstRun {
+			err = os.WriteFile(p, []byte(archive), 0o644)
+		} else if f, ferr := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); ferr == nil {
+			_, err = f.WriteString("--- PROOF RETRY ---\n" + archive)
+			f.Close()
+		} else {
+			err = ferr
+		}
+		if err != nil {
 			logStderr("cc: prompt archive failed (continuing): %v", err)
 		}
 	}
@@ -123,15 +210,15 @@ func (e *Engine) implementCC(ctx context.Context, absRepo, task, gateDir string)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		res.Err = "cc: stdout pipe: " + err.Error()
-		return res
+		return false
 	}
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 
-	logStderr("worker.implement engine=cc bin=%s base=%s repo=%s", bin, base, absRepo)
+	logStderr("worker.implement engine=cc bin=%s base=%s repo=%s retry=%v", bin, base, absRepo, !firstRun)
 	if err := cmd.Start(); err != nil {
 		res.Err = "cc: launch " + bin + ": " + err.Error()
-		return res
+		return false
 	}
 
 	// Mirror the raw stream to a harness-owned file (same rationale as
@@ -145,10 +232,10 @@ func (e *Engine) implementCC(ctx context.Context, absRepo, task, gateDir string)
 		}
 	}
 
-	sawResult, jsonLines, totalLines := e.parseCCStream(stdout, mirror, &res)
+	sawResult, jsonLines, totalLines := e.parseCCStream(stdout, mirror, res, proof)
 	werr := cmd.Wait()
 
-	if !sawResult {
+	if !sawResult && firstRun {
 		res.Stopped = "error"
 		msg := "cc: stream ended without a result event"
 		// Version-skew guard (map10 P2): a claude CLI whose output is not the
@@ -170,10 +257,10 @@ func (e *Engine) implementCC(ctx context.Context, absRepo, task, gateDir string)
 			msg += ": " + truncate(s, 2000)
 		}
 		res.Err = msg
+	} else if !sawResult {
+		logStderr("cc: proof retry ended without a result event (keeping first run's result)")
 	}
-
-	res.Diff, res.FilesChanged = e.collectDiff(ctx, absRepo)
-	return res
+	return sawResult
 }
 
 // ccAPIKey is the placeholder key the subprocess authenticates with against the
@@ -203,7 +290,7 @@ func ccModel() string {
 //	{"type":"assistant","message":{"content":[{"type":"tool_use","id":..,"name":"Bash","input":{"command":..}}]}}
 //	{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":..,"content":..}]}}
 //	{"type":"result","subtype":"success","result":..,"num_turns":..,"usage":{..}}
-func (e *Engine) parseCCStream(r interface{ Read([]byte) (int, error) }, mirror *os.File, res *Result) (sawResult bool, jsonLines, totalLines int) {
+func (e *Engine) parseCCStream(r interface{ Read([]byte) (int, error) }, mirror *os.File, res *Result, proof *ccProof) (sawResult bool, jsonLines, totalLines int) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 1<<20), 1<<24) // tool results can be large
 
@@ -253,6 +340,9 @@ func (e *Engine) parseCCStream(r interface{ Read([]byte) (int, error) }, mirror 
 					continue
 				}
 				cmd, ok := bashCmd[b.ToolUseID]
+				if ok && proof != nil {
+					proof.observe(cmd, ccResultText(b), b.IsError)
+				}
 				// Same rule as the 3-tool loop's gate pick: only a command that
 				// RUNS code can verify it; `git diff`/`ls` cannot. The pick
 				// travels with the output via LastTestCmd... which C0's Result
@@ -300,6 +390,57 @@ type ccBlock struct {
 	ToolUseID string          `json:"tool_use_id"`
 	Content   json.RawMessage `json:"content"`
 	Text      string          `json:"text"`
+	IsError   bool            `json:"is_error"`
+}
+
+// ccProofFile is the canonical proof-test filename the worker is instructed to
+// use; the detector keys on it, so a proof under any other name does not count.
+const ccProofFile = "rig_proof_test.py"
+
+// ccProof accumulates red->green evidence for the proof-of-flip contract (V6).
+// Evidence is read from the worker's OWN tool_use/tool_result stream events —
+// never from its prose (D3: prose can be faked wholesale; a tool_result cannot
+// without also faking the run). The flip counts only when a FAIL and a later
+// PASS were produced by the byte-normalized SAME command.
+type ccProof struct {
+	redSeen map[string]bool // normalized cmd -> a failing run was seen
+	Flip    bool            // some cmd went red first, green later
+}
+
+func (p *ccProof) observe(cmd, resultText string, isError bool) {
+	if !strings.Contains(cmd, ccProofFile) {
+		return
+	}
+	if p.redSeen == nil {
+		p.redSeen = map[string]bool{}
+	}
+	key := strings.Join(strings.Fields(cmd), " ")
+	switch ccProofOutcome(resultText, isError) {
+	case "red":
+		p.redSeen[key] = true
+	case "green":
+		if p.redSeen[key] {
+			p.Flip = true
+		}
+	}
+}
+
+// ccProofOutcome classifies one proof-test run. is_error mirrors the Bash
+// tool's exit status (pytest exits non-zero on any failure), and the textual
+// patterns back it up for CC versions that do not set the flag.
+func ccProofOutcome(txt string, isError bool) string {
+	t := strings.ToLower(txt)
+	failed := strings.Contains(t, " failed") || strings.Contains(t, "error") ||
+		strings.Contains(t, "traceback")
+	passed := strings.Contains(t, " passed")
+	switch {
+	case isError || failed:
+		return "red"
+	case passed:
+		return "green"
+	default:
+		return ""
+	}
 }
 
 func ccContentBlocks(raw json.RawMessage) []ccBlock {

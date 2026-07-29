@@ -99,6 +99,25 @@ func stripRigHooks(path string) error {
 	if settings["outputStyle"] == "rig-delegate" || settings["outputStyle"] == "rig-explore" {
 		delete(settings, "outputStyle")
 	}
+	// Remove only our worker-tool grant; user-managed permission rules stay.
+	if perms, ok := settings["permissions"].(map[string]any); ok {
+		if allow, ok := perms["allow"].([]any); ok {
+			kept := make([]any, 0, len(allow))
+			for _, v := range allow {
+				if v != workerToolPermission {
+					kept = append(kept, v)
+				}
+			}
+			if len(kept) == 0 {
+				delete(perms, "allow")
+			} else {
+				perms["allow"] = kept
+			}
+		}
+		if len(perms) == 0 {
+			delete(settings, "permissions")
+		}
+	}
 	hooks, ok := settings["hooks"].(map[string]any)
 	if !ok {
 		out, err := json.MarshalIndent(settings, "", "  ")

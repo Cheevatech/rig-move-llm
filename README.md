@@ -126,6 +126,14 @@ OAuth/keychain identity is never exposed to the worker leg) and runs with web to
 version-skew error rather than an empty result. The setup wizard offers this choice under
 "Worker engine"; the default stays `loop`.
 
+**Known limitation — a green gate is not proof of correctness.** On an unselected
+SWE-bench_Lite sample, the delegated worker sometimes produced fixes that removed the reported
+symptom and kept every existing test green, yet still failed the issue's hidden acceptance
+tests — and the orchestrator signed off on the worker's "gate passed" report. The savings
+claim holds when the task's expected behaviour is stated precisely enough that the worker's
+own reproduction doubles as an acceptance test; when a bug report only describes a symptom,
+treat the worker's success report as unverified until a test you own covers the fix.
+
 ### Automatic worker fallback (zero-token)
 
 The worker endpoint is bring-your-own, so it can be down when Claude Code is not. At the **start of

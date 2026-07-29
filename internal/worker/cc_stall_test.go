@@ -23,6 +23,28 @@ func TestRunTimeoutStaysUnderClientWatchdog(t *testing.T) {
 	}
 }
 
+// The guards only work as a ladder: the stall guard must speak before the wall
+// guard, which must speak before the client gives up. And the stall guard must
+// stay ABOVE the longest honest silence — a Bash tool call streams nothing until
+// the command returns, and Claude Code allows one to run ~10 minutes, so a
+// tighter limit would kill healthy rounds in the middle of a slow test suite.
+func TestGuardLadder(t *testing.T) {
+	const (
+		clientWatchdog  = 1800 * time.Second
+		longestBashCall = 600 * time.Second
+	)
+	stall, wall := ccStallTimeout(), runTimeout()
+	if stall < longestBashCall {
+		t.Errorf("stall guard %s is below the %s bash ceiling — it would kill healthy rounds", stall, longestBashCall)
+	}
+	if stall >= wall {
+		t.Errorf("stall guard %s must fire before the wall guard %s", stall, wall)
+	}
+	if wall >= clientWatchdog {
+		t.Errorf("wall guard %s must fire before the %s client watchdog", wall, clientWatchdog)
+	}
+}
+
 func TestCCTimeoutDiagnosis(t *testing.T) {
 	t.Run("neither guard fired", func(t *testing.T) {
 		msg, stopped := ccTimeoutDiagnosis(context.Background(), newCCActivity())

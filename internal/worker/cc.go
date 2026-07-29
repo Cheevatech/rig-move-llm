@@ -311,11 +311,15 @@ func (e *Engine) runCCOnce(ctx context.Context, bin, base, absRepo, user string,
 // output at all before the engine kills it. Measured failure (#18): a cc round
 // on a doc-heavy task went silent and stayed silent until Claude Code aborted
 // the MCP call at 1800s — the caller learned nothing, and MAIN re-delegated into
-// the same silence. 300s is far above the gap between a normal round's events
-// (tool calls stream continuously) and far below the client watchdog, so the
-// engine always speaks first. 0 disables the guard.
+// the same silence. A live worker streams an event per tool call, so silence is
+// a real liveness signal — but it has ONE legitimate long form: a Bash tool call
+// emits nothing until the command returns, and Claude Code lets a command run
+// for roughly ten minutes. 600s therefore sits just past the longest honest
+// silence (a slow test suite) and well under the wall guard, which in turn sits
+// under the client watchdog. Lowering it below the bash ceiling starts killing
+// healthy rounds mid-test-run. 0 disables the guard.
 func ccStallTimeout() time.Duration {
-	return time.Duration(envInt("RIG_CC_STALL_TIMEOUT", 300)) * time.Second
+	return time.Duration(envInt("RIG_CC_STALL_TIMEOUT", 600)) * time.Second
 }
 
 // ccStallCheckInterval is how often the watchdog samples the tracker. It only

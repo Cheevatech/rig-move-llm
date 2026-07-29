@@ -152,7 +152,7 @@ func applyInit(o initOpts) int {
 		fmt.Fprintln(os.Stderr, "init:", err)
 		return 1
 	}
-	if err := wireSettings(filepath.Join(claudeDir, "settings.json"), filepath.Join(dataDir, "settings.json.bak"), config.Load().GateMode); err != nil {
+	if err := wireSettings(filepath.Join(claudeDir, "settings.json"), filepath.Join(dataDir, "settings.json.bak"), config.Load().GateMode, o.npxWorker); err != nil {
 		fmt.Fprintln(os.Stderr, "init: settings:", err)
 		return 1
 	}
@@ -394,7 +394,7 @@ func modelNote(model string) string {
 // wireSettings merges the rig-move-llm hooks into an existing (or new) Claude Code
 // settings.json, preserving unrelated keys. The original file is backed up once to
 // backupPath so `uninstall` can restore it verbatim.
-func wireSettings(path, backupPath, gateMode string) error {
+func wireSettings(path, backupPath, gateMode string, npx bool) error {
 	settings := map[string]any{}
 	if data, err := os.ReadFile(path); err == nil {
 		_ = json.Unmarshal(data, &settings)
@@ -406,6 +406,14 @@ func wireSettings(path, backupPath, gateMode string) error {
 	// Pre-approve the project-root .mcp.json server so headless `claude -p` does not
 	// hang on the MCP trust dialog (see memory cc-persistent-autowire-recipe).
 	settings["enableAllProjectMcpServers"] = true
+
+	// hookCmd returns the correct hook command form based on the --npx flag.
+	hookCmd := func(args ...string) string {
+		if npx {
+			return "npx -y rig-move-llm hook " + strings.Join(args, " ")
+		}
+		return "rig-move-llm hook " + strings.Join(args, " ")
+	}
 
 	// Activate the output style — the system-prompt-tier workflow lever (P10).
 	// hard gate = terse plan→delegate→review; soft gate (map6) = explore-first:
@@ -420,26 +428,26 @@ func wireSettings(path, backupPath, gateMode string) error {
 	settings["hooks"] = map[string]any{
 		"PreToolUse": []any{map[string]any{
 			"matcher": "*",
-			"hooks":   []any{map[string]any{"type": "command", "command": "rig-move-llm hook pre-tool"}},
+			"hooks":   []any{map[string]any{"type": "command", "command": hookCmd("pre-tool")}},
 		}},
 		"PostToolUse": []any{map[string]any{
 			// Gate on the worker MCP tool return (Option 2) and on legacy/teammate
 			// Task/Agent returns.
 			"matcher": "Task|Agent|mcp__worker__implement",
-			"hooks":   []any{map[string]any{"type": "command", "command": "rig-move-llm hook post-tool", "timeout": 600}},
+			"hooks":   []any{map[string]any{"type": "command", "command": hookCmd("post-tool"), "timeout": 600}},
 		}},
 		// SessionStart: lazily materialize a per-project .rig-move-llm/ carrying the
 		// configured settings, the way Serena creates .serena on first session. Runs
 		// on a new session or a resume; context-only, never blocks.
 		"SessionStart": []any{map[string]any{
 			"matcher": "startup|resume",
-			"hooks":   []any{map[string]any{"type": "command", "command": "rig-move-llm hook session-start"}},
+			"hooks":   []any{map[string]any{"type": "command", "command": hookCmd("session-start")}},
 		}},
 		// UserPromptSubmit: probe the worker endpoint once per message (zero-token
 		// HTTP GET). An unreachable worker flips the per-tool hooks to passthrough so
 		// the hybrid degrades to plain Claude Code automatically. Never blocks.
 		"UserPromptSubmit": []any{map[string]any{
-			"hooks": []any{map[string]any{"type": "command", "command": "rig-move-llm hook user-prompt"}},
+			"hooks": []any{map[string]any{"type": "command", "command": hookCmd("user-prompt")}},
 		}},
 	}
 

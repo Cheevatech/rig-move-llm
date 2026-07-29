@@ -120,6 +120,96 @@ func TestInitAutoWire(t *testing.T) {
 	}
 }
 
+// TestInitNpxHookForm verifies init writes the correct hook command form
+// depending on the --npx flag: bare `rig-move-llm hook <name>` without --npx,
+// and `npx -y rig-move-llm hook <name>` with --npx.
+func TestInitNpxHookForm(t *testing.T) {
+	// Helper to read and return hook commands from settings.json
+	readHookCommands := func(dir string) map[string]string {
+		data, err := os.ReadFile(filepath.Join(dir, ".claude", "settings.json"))
+		if err != nil {
+			t.Helper()
+			t.Fatalf("settings.json missing: %v", err)
+		}
+		var settings map[string]any
+		if err := json.Unmarshal(data, &settings); err != nil {
+			t.Helper()
+			t.Fatalf("settings.json invalid: %v", err)
+		}
+		hooks := settings["hooks"].(map[string]any)
+		cmds := map[string]string{}
+		for name, arr := range hooks {
+			hookList := arr.([]any)
+			entry := hookList[0].(map[string]any)
+			hooksInner := entry["hooks"].([]any)
+			hookEntry := hooksInner[0].(map[string]any)
+			cmds[name] = hookEntry["command"].(string)
+		}
+		return cmds
+	}
+
+	wd, _ := os.Getwd()
+
+	// --- Without --npx: bare form ---
+	t.Run("bare", func(t *testing.T) {
+		home := t.TempDir()
+		proj := t.TempDir()
+		t.Setenv("HOME", home)
+		if err := os.Chdir(proj); err != nil {
+			t.Fatal(err)
+		}
+		defer os.Chdir(wd)
+
+		if rc := cmdInit([]string{"--no-detect", "--backend", "ollama",
+			"--worker-base", "http://localhost:11434/v1", "--worker-model", "m"}); rc != 0 {
+			t.Fatalf("cmdInit rc=%d", rc)
+		}
+
+		cmds := readHookCommands(proj)
+		want := map[string]string{
+			"PreToolUse":     "rig-move-llm hook pre-tool",
+			"PostToolUse":    "rig-move-llm hook post-tool",
+			"SessionStart":   "rig-move-llm hook session-start",
+			"UserPromptSubmit": "rig-move-llm hook user-prompt",
+		}
+		for name, expected := range want {
+			if cmds[name] != expected {
+				t.Errorf("hook %s: got %q, want %q", name, cmds[name], expected)
+			}
+		}
+	})
+
+	// --- With --npx: npx form ---
+	t.Run("npx", func(t *testing.T) {
+		home := t.TempDir()
+		proj := t.TempDir()
+		t.Setenv("HOME", home)
+		if err := os.Chdir(proj); err != nil {
+			t.Fatal(err)
+		}
+		defer os.Chdir(wd)
+
+		if rc := cmdInit([]string{"--no-detect", "--backend", "ollama",
+			"--worker-base", "http://localhost:11434/v1", "--worker-model", "m",
+			"--npx"}); rc != 0 {
+			t.Fatalf("cmdInit rc=%d", rc)
+		}
+
+		cmds := readHookCommands(proj)
+		want := map[string]string{
+			"PreToolUse":     "npx -y rig-move-llm hook pre-tool",
+			"PostToolUse":    "npx -y rig-move-llm hook post-tool",
+			"SessionStart":   "npx -y rig-move-llm hook session-start",
+			"UserPromptSubmit": "npx -y rig-move-llm hook user-prompt",
+		}
+		for name, expected := range want {
+			if cmds[name] != expected {
+				t.Errorf("hook %s: got %q, want %q", name, cmds[name], expected)
+			}
+		}
+	})
+}
+
 // TestInitPreservesUserCLAUDEmd verifies init never clobbers a user's own
 // CLAUDE.md and uninstall leaves it intact.
 func TestInitPreservesUserCLAUDEmd(t *testing.T) {

@@ -61,7 +61,11 @@ type Result struct {
 	Iterations   int    `json:"iterations"`
 	InputTokens  int    `json:"input_tokens"`
 	OutputTokens int    `json:"output_tokens"`
-	Stopped      string `json:"stopped"` // "done" | "max_iters" | "error"
+	// Stopped is "done" | "max_iters" | "error" | "timeout". "timeout" is a round
+	// the engine itself killed on a wall/stall guard (#18) — distinct from
+	// "error" because the work may be half-done in the tree and because the right
+	// next move is to report it, never to re-delegate the same task blind.
+	Stopped      string `json:"stopped"`
 	// HitIterationCap mirrors Stopped=="max_iters" as an explicit flag so MAIN's
 	// review knows the worker ran out of budget before declaring done.
 	HitIterationCap bool `json:"hit_iteration_cap,omitempty"`
@@ -72,6 +76,11 @@ type Result struct {
 	Checkpoints int    `json:"checkpoints,omitempty"`
 	Err         string `json:"error,omitempty"`
 }
+
+// Failed reports whether this round should be flagged isError to the caller: a
+// hard error, or a round the engine killed on one of its guards. Both mean "no
+// verified result came back"; the Stopped value tells them apart.
+func (r Result) Failed() bool { return r.Stopped == "error" || r.Stopped == "timeout" }
 
 // Engine drives implement runs against a configured worker endpoint.
 type Engine struct {

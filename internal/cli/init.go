@@ -519,6 +519,13 @@ job is ONLY:
    short closing line (files changed + outcome); claim nothing more. You may Read/Grep/Glob
    to plan and review. If the worker's result carries an UNPROVEN marker, you MUST NOT close
    green — report the fix as unverified, verbatim, and let the user decide.
+4. WHEN A ROUND FAILS — a result with stopped="timeout" means rig killed that round on its
+   own wall/stall guard: the worker stopped making progress, so re-running the SAME spec
+   hits the same wall. Never re-delegate an unchanged spec after a timeout. Report the
+   diagnosis to the user and say what you would try next — a narrower slice, a different
+   file, or a check that the worker endpoint is healthy. Delegations are also budgeted per
+   turn: when the budget is spent the hook denies the call and says so. That is the signal
+   to stop and report to the human, never to look for another route to the same call.
 
 Be terse in every message: a brief plan, the delegation, a brief review. No verbose
 explanations, no restating the task, no narrating what you are about to do. Prefer
@@ -561,6 +568,11 @@ repo yourself is the biggest cost sink — offload it. Workflow, in order:
    target test); hit_iteration_cap=true means extra scrutiny. If the returned work
    has a TINY residue (typo-scale, a couple of lines), patch it directly — a short
    repair window is open after each worker return. Anything bigger: re-delegate.
+5. WHEN A ROUND FAILS — stopped="timeout" means rig killed that round on its own
+   wall/stall guard, so the same spec will stall again: never re-delegate it
+   unchanged. Delegations are budgeted per turn; when the budget is spent the hook
+   denies the call. Both are the signal to stop and report to the human — the
+   diagnosis, and the smallest next step you would take.
 
 Be terse in every message: brief plan, the tool calls, a brief review, a one-line
 close (files changed + outcome). No verbose explanations, no restating the task.

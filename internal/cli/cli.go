@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -264,7 +265,29 @@ func buildHookState() *hook.State {
 		HealthTTL:    10 * time.Minute,
 		GateMode:     cfg.GateMode,
 		StateDir:     dir,
+		MaxRounds:    maxDelegateRounds(),
 	}
+}
+
+// defaultMaxDelegateRounds bounds delegations per turn. Measured (map13 volley
+// 2): a task that needed real iteration finished in 3 rounds, and the runaway
+// that motivated the budget was still dispatching identical rounds at the 4th.
+// So 3 is "as many rounds as a hard task honestly took", and the 4th is the one
+// that has to justify itself to a human.
+const defaultMaxDelegateRounds = 3
+
+// maxDelegateRounds reads the per-turn delegation budget. 0 (or a negative
+// value) disables it.
+func maxDelegateRounds() int {
+	v := strings.TrimSpace(os.Getenv("RIG_MAX_DELEGATE_ROUNDS"))
+	if v == "" {
+		return defaultMaxDelegateRounds
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return defaultMaxDelegateRounds
+	}
+	return n
 }
 
 // parseList splits a comma/space-separated list into a set (lowercased).

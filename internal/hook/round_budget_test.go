@@ -1,0 +1,138 @@
+package hook
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/Cheevatech/rig-move-llm/internal/gatestate"
+)
+
+func budgetState(t *testing.T, max int) *State {
+	t.Helper()
+	dir := t.TempDir()
+	return &State{
+		Enabled:   true,
+		GatePaths: filepath.Join(dir, "gate_paths"),
+		LogPath:   filepath.Join(dir, "log"),
+		StateDir:  dir,
+		MaxRounds: max,
+	}
+}
+
+const implementCall = `{"tool_name":"mcp__worker__implement","tool_input":{}}`
+
+// The runaway shape from #18: a round fails, MAIN delegates again, forever. The
+// budget lets a genuinely iterative task through (3 rounds was the measured cost
+// of a hard one) and stops the round after it.
+func TestRoundBudget_DeniesTheRoundAfterTheBudget(t *testing.T) {
+	s := budgetState(t, 3)
+
+	for i := 1; i <= 3; i++ {
+		if denied, out := preDecision(t, s, implementCall); denied {
+			t.Fatalf("round %d must be allowed within a budget of 3; out=%q", i, out)
+		}
+	}
+
+	denied, out := preDecision(t, s, implementCall)
+	if !denied {
+		t.Fatal("the 4th delegation must be denied")
+	}
+	for _, want := range []string{"budget for this turn is spent", "STOP now and report to the human", "resets on their next message"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("deny reason missing %q; out=%q", want, out)
+		}
+	}
+}
+
+// The escape hatch is the human's next message — no new knob. UserPromptSubmit
+// calls ClearTurn, which must reopen the budget.
+func TestRoundBudget_ClearTurnReopensTheBudget(t *testing.T) {
+	s := budgetState(t, 1)
+
+	if denied, _ := preDecision(t, s, implementCall); denied {
+		t.Fatal("the first delegation must be allowed")
+	}
+	if denied, _ := preDecision(t, s, implementCall); !denied {
+		t.Fatal("the second delegation must be denied under a budget of 1")
+	}
+
+	gatestate.ClearTurn(s.StateDir)
+
+	if denied, out := preDecision(t, s, implementCall); denied {
+		t.Fatalf("a new turn must reopen the budget; out=%q", out)
+	}
+}
+
+// A denied round must not have side effects: freezing a contract or closing the
+// repair window on a call that never ran would corrupt the state MAIN reasons
+// from.
+func TestRoundBudget_DeniedRoundHasNoSideEffects(t *testing.T) {
+	s := budgetState(t, 1)
+	repo := filepath.Join(t.TempDir(), "repo")
+	gate := filepath.Join(repo, ".gate")
+	if err := os.MkdirAll(gate, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gate, "repro.py"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if denied, _ := preDecision(t, s, implementCall); denied {
+		t.Fatal("the first delegation must be allowed")
+	}
+
+	// Authored after the budget was spent: the denied call must leave it alone.
+	s.appendGatePath(gate)
+	if err := gatestate.WriteRepair(s.StateDir, gatestate.Repair{EditsLeft: 2, OpenedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+
+	if denied, _ := preDecision(t, s, implementCall); !denied {
+		t.Fatal("the second delegation must be denied")
+	}
+	if isDir(filepath.Join(repo, ".gate.frozen")) {
+		t.Error("a denied delegation must not freeze the gate contract")
+	}
+	if _, open := gatestate.ReadRepair(s.StateDir); !open {
+		t.Error("a denied delegation must not close the open repair window")
+	}
+}
+
+// Fail-open: the budget is a guard rail, never a reason MAIN cannot work. With
+// it disabled (0) or with no state dir, delegation behaves exactly as before.
+func TestRoundBudget_FailsOpen(t *testing.T) {
+	t.Run("disabled by zero", func(t *testing.T) {
+		s := budgetState(t, 0)
+		for i := 0; i < 5; i++ {
+			if denied, out := preDecision(t, s, implementCall); denied {
+				t.Fatalf("delegation %d denied with the budget disabled; out=%q", i, out)
+			}
+		}
+	})
+	t.Run("no state dir", func(t *testing.T) {
+		s := budgetState(t, 1)
+		s.StateDir = ""
+		for i := 0; i < 5; i++ {
+			if denied, out := preDecision(t, s, implementCall); denied {
+				t.Fatalf("delegation %d denied without a state dir; out=%q", i, out)
+			}
+		}
+	})
+}
+
+// Only implement is budgeted: the free Stage-0 tools must stay unmetered, or the
+// budget would push MAIN back into reading the repo itself.
+func TestRoundBudget_OnlyMetersImplement(t *testing.T) {
+	s := budgetState(t, 1)
+	for i := 0; i < 5; i++ {
+		if denied, out := preDecision(t, s, `{"tool_name":"mcp__worker__explore","tool_input":{}}`); denied {
+			t.Fatalf("explore call %d denied; out=%q", i, out)
+		}
+	}
+	if denied, _ := preDecision(t, s, implementCall); denied {
+		t.Fatal("implement must still have its full budget after explore calls")
+	}
+}

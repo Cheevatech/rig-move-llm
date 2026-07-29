@@ -146,8 +146,11 @@ func TestCCChildEnvScrubsRigConfig(t *testing.T) {
 
 	env := ccChildEnv("http://worker-leg")
 	for _, kv := range env {
-		if strings.HasPrefix(kv, "RIG_") {
-			t.Errorf("RIG_ var leaked into child env: %s", kv)
+		// RIG_AGENT_ID is the deliberate exception (#24): it is rig's identity
+		// stamp for the child, not rig config, and without it the hook mistakes
+		// the worker for the paid MAIN leg and denies its tools.
+		if strings.HasPrefix(kv, "RIG_") && !strings.HasPrefix(kv, "RIG_AGENT_ID=") {
+			t.Errorf("RIG_ config leaked into child env: %s", kv)
 		}
 	}
 	joined := "\n" + strings.Join(env, "\n") + "\n"
@@ -191,9 +194,13 @@ func TestCCSubprocessSeesNoRigEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, line := range strings.Split(string(envFull), "\n") {
-		if strings.HasPrefix(line, "RIG_") {
+		if strings.HasPrefix(line, "RIG_") && !strings.HasPrefix(line, "RIG_AGENT_ID=") {
 			t.Errorf("subprocess saw rig config: %s", line)
 		}
+	}
+	// ...and it MUST carry the identity stamp, or the hook denies its tools (#24).
+	if !strings.Contains(string(envFull), "RIG_AGENT_ID="+ccWorkerAgentID) {
+		t.Errorf("subprocess is not stamped as the worker:\n%s", envFull)
 	}
 	if !strings.Contains(string(envFull), "ANTHROPIC_BASE_URL=http://127.0.0.1:9/worker-leg") {
 		t.Errorf("subprocess missing worker-leg base URL:\n%s", envFull)

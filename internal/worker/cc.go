@@ -170,8 +170,21 @@ func ccChildEnv(base string) []string {
 	}
 	return append(env,
 		"ANTHROPIC_BASE_URL="+base,
-		"ANTHROPIC_API_KEY="+ccAPIKey())
+		"ANTHROPIC_API_KEY="+ccAPIKey(),
+		// The one RIG_* the child MUST carry (#24). The worker runs as its own
+		// `claude -p` session, so its hook payloads have no agent_id — and with
+		// every RIG_* stripped, the force-delegate hook read it as the paid MAIN
+		// leg and denied its Edit/Write/Bash calls. Measured: a round that burned
+		// the full wall guard with iters=0 and an empty diff, its last_test field
+		// containing rig's own "Main agent is plan/delegate/review only" deny.
+		// The posture applies to MAIN; the worker must be not-MAIN by
+		// construction, and RIG_AGENT_ID is the existing seam that says so.
+		"RIG_AGENT_ID="+ccWorkerAgentID)
 }
+
+// ccWorkerAgentID identifies the cc worker subprocess to rig's hooks. Any
+// non-empty value works; a descriptive one makes force-delegate.log readable.
+const ccWorkerAgentID = "cc-worker"
 
 // runCCOnce spawns one `claude -p` subprocess and parses its stream into res,
 // accumulating proof evidence. firstRun gates the skew diagnostics and the

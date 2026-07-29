@@ -83,6 +83,11 @@ type State struct {
 	// MCP server persists the explore/triage/repair state files.
 	GateMode string
 	StateDir string
+	// MaxRounds bounds how many times MAIN may delegate within ONE turn. A
+	// delegation that fails the same way every time (the #18 timeout) invites an
+	// unbounded retry loop, and every round costs a full MAIN think — the map9
+	// money driver. 0 disables the budget.
+	MaxRounds int
 }
 
 // Soft-gate bounds. Solo covers a declared small change at Stage-0-verified
@@ -188,6 +193,13 @@ func (s *State) PreTool(r io.Reader, w io.Writer) error {
 		// frozen contract. The Stage-0 explore/triage tools pass through freely.
 		if mcpServer(p.ToolName) == workerServer {
 			if p.ToolName == workerTool {
+				// Anti-runaway budget (#18): count this delegation FIRST, and stop
+				// here if the turn's rounds are spent — a denied call must not
+				// freeze contracts or close the repair window.
+				if n, over := s.overRoundBudget(); over {
+					s.logf("ROUNDS deny round=%d max=%d", n, s.MaxRounds)
+					return denyMsg(w, roundBudgetReason(n, s.MaxRounds))
+				}
 				s.freezeGateDirs()
 				// Re-delegating supersedes any open Gate B window; a fresh one
 				// opens when this call returns.
@@ -211,6 +223,34 @@ func (s *State) PreTool(r io.Reader, w io.Writer) error {
 	}
 
 	return nil
+}
+
+// overRoundBudget records this delegation and reports whether the turn's budget
+// is spent. It is deliberately fail-open: with no state dir or no budget
+// configured, MAIN delegates as before.
+func (s *State) overRoundBudget() (int, bool) {
+	if s.StateDir == "" || s.MaxRounds <= 0 {
+		return 0, false
+	}
+	n := gatestate.BumpRound(s.StateDir)
+	return n, n > s.MaxRounds
+}
+
+// roundBudgetReason is the steer MAIN reads when the budget is spent. It names
+// the loop it is in, tells it to stop and report, and states plainly that the
+// human's next message is what reopens the budget — so nothing here needs a new
+// knob, and the human stays the one who decides another round is worth paying
+// for.
+func roundBudgetReason(n, max int) string {
+	return fmt.Sprintf(
+		"Delegation budget for this turn is spent: this is delegate call %d, the limit is %d. "+
+			"Re-delegating a task that already failed the same way is the runaway loop this budget exists "+
+			"to stop — every round costs a full round of your own thinking, and a worker that timed out or "+
+			"returned nothing will do it again. STOP now and report to the human: what each round returned, "+
+			"what you think is actually wrong, and the smallest next step you would take (a narrower slice "+
+			"of the task, a different file, or checking whether the worker endpoint is healthy). "+
+			"The budget resets on their next message — if they want another round, they will say so. "+
+			"(Operator override: RIG_MAX_DELEGATE_ROUNDS.)", n, max)
 }
 
 // softEdit is the map6 soft-gate decision for a MAIN Edit/Write. It returns

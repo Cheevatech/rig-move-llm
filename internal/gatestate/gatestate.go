@@ -30,6 +30,7 @@ const (
 	exploreFile = "explore_state.json"
 	triageFile  = "triage_state.json"
 	repairFile  = "repair_window.json"
+	roundsFile  = "delegate_rounds.json"
 
 	// ExploreTTL bounds how long Stage-0 evidence stays valid for triage.
 	ExploreTTL = 2 * time.Hour
@@ -37,6 +38,11 @@ const (
 	TriageTTL = 2 * time.Hour
 	// RepairTTL bounds the Gate B window after a worker return.
 	RepairTTL = 15 * time.Minute
+	// RoundsTTL bounds the delegation counter. The counter is normally reset by
+	// the UserPromptSubmit hook (a new message is a new intake); the TTL is the
+	// backstop for an install where that hook never runs, so a stale count can
+	// never wedge MAIN out of delegating forever.
+	RoundsTTL = 2 * time.Hour
 )
 
 // Explore is the persisted digest of a worker.explore run — only what the
@@ -64,6 +70,42 @@ type Triage struct {
 type Repair struct {
 	EditsLeft int       `json:"edits_left"`
 	OpenedAt  time.Time `json:"opened_at"`
+}
+
+// Rounds counts how many times MAIN has delegated to the worker in the CURRENT
+// turn. It is the anti-runaway budget: a delegation that fails in a way that
+// repeats (a timeout, a worker that returns nothing) invites MAIN to delegate
+// again forever, which is the map9 money failure with no natural stop (#18).
+type Rounds struct {
+	Count int       `json:"count"`
+	At    time.Time `json:"at"`
+}
+
+// BumpRound records one delegation and returns the new count for this turn. A
+// missing or expired counter starts over at 1. A write failure returns the count
+// it would have been: the budget must never deny MAIN because of a disk error,
+// so an unwritable state dir degrades to "no budget" rather than "no delegating".
+func BumpRound(dir string) int {
+	r, _ := ReadRounds(dir)
+	r.Count++
+	r.At = time.Now()
+	if write(filepath.Join(dir, roundsFile), r) != nil {
+		return 1
+	}
+	return r.Count
+}
+
+// ReadRounds returns this turn's delegation count and whether it exists and is
+// still fresh. An expired counter reads as zero.
+func ReadRounds(dir string) (Rounds, bool) {
+	var r Rounds
+	if !read(filepath.Join(dir, roundsFile), &r) {
+		return Rounds{}, false
+	}
+	if time.Since(r.At) > RoundsTTL {
+		return Rounds{}, false
+	}
+	return r, true
 }
 
 func WriteExplore(dir string, e Explore) error { return write(filepath.Join(dir, exploreFile), e) }
@@ -97,12 +139,15 @@ func ReadRepair(dir string) (Repair, bool) {
 	return r, r.EditsLeft > 0 && time.Since(r.OpenedAt) <= RepairTTL
 }
 
-// ClearTurn removes the per-task decisions (triage + repair) but keeps the
-// explore evidence, which is expensive to redo and can be re-triaged against.
-// Called on every UserPromptSubmit: a new user message is a new intake.
+// ClearTurn removes the per-task decisions (triage + repair + the delegation
+// budget) but keeps the explore evidence, which is expensive to redo and can be
+// re-triaged against. Called on every UserPromptSubmit: a new user message is a
+// new intake — and, for the budget, it is also the human's acknowledgement that
+// another round is wanted.
 func ClearTurn(dir string) {
 	_ = os.Remove(filepath.Join(dir, triageFile))
 	_ = os.Remove(filepath.Join(dir, repairFile))
+	_ = os.Remove(filepath.Join(dir, roundsFile))
 }
 
 // ClearRepair closes the Gate B window (e.g. when MAIN re-delegates instead).

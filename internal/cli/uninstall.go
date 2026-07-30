@@ -178,7 +178,7 @@ func mentionsRig(entry any) bool {
 		if !ok {
 			continue
 		}
-		if cmd, _ := hm["command"].(string); strings.Contains(cmd, "rig-move-llm") {
+		if cmd, _ := hm["command"].(string); commandMentionsRig(cmd) {
 			return true
 		}
 	}

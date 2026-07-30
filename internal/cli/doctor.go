@@ -16,6 +16,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -49,6 +50,18 @@ func (s rungStatus) label() string {
 	}
 }
 
+// jsonTag maps rungStatus to the lowercase strings used in JSON output.
+func (s rungStatus) jsonTag() string {
+	switch s {
+	case rungPass:
+		return "pass"
+	case rungFail:
+		return "fail"
+	default:
+		return "skip"
+	}
+}
+
 // rung is one line of the report: what was checked, what happened, and — when it
 // failed — the concrete thing to do about it. fix is mandatory on a FAIL by
 // convention: a diagnosis the user cannot act on is how the ad-hoc ladder used to
@@ -58,6 +71,20 @@ type rung struct {
 	status rungStatus
 	detail string
 	fix    string
+}
+
+// doctorResult is the top-level JSON output for machine-readable consumption.
+type doctorResult struct {
+	Ok    bool         `json:"ok"`
+	Rungs []rungResult `json:"rungs"`
+}
+
+// rungResult is a single rung as it appears in the JSON output.
+type rungResult struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Detail string `json:"detail"`
+	Fix    string `json:"fix,omitempty"`
 }
 
 func pass(name, detail string) rung { return rung{name: name, status: rungPass, detail: detail} }
@@ -75,13 +102,21 @@ const doctorTimeout = 90 * time.Second
 
 func cmdDoctor(args []string) int {
 	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
-		fmt.Println("Usage: rig-move-llm doctor\n\n" +
+		fmt.Println("Usage: rig-move-llm doctor [--json]\n\n" +
 			"Proves the offload rig is live before you trust a measurement: config, worker\n" +
 			"endpoint (authenticated), cc engine, workspace trust, hooks (actually firing),\n" +
 			"the repo's gate toolchain as the WORKER sees it, the effective guards, and\n" +
 			"whether the MAIN leg has credentials to open a session at all.\n" +
-			"Exits non-zero if any rung fails.")
+			"  --json  Output results as a single JSON object on stdout\n" +
+			"Exits non-zero if any rung failed.")
 		return 0
+	}
+
+	jsonMode := false
+	for _, a := range args {
+		if a == "--json" {
+			jsonMode = true
+		}
 	}
 
 	cwd, _ := os.Getwd()
@@ -98,21 +133,56 @@ func cmdDoctor(args []string) int {
 		checkMainAuth(),
 	}
 
-	failed := 0
-	for _, r := range rungs {
-		fmt.Printf("%-4s  %-18s  %s\n", r.status.label(), r.name, r.detail)
-		if r.status == rungFail {
-			failed++
-			fmt.Printf("      %-18s  fix: %s\n", "", r.fix)
-		}
-	}
-	fmt.Println()
+	failed := renderDoctor(os.Stdout, rungs, jsonMode)
 	if failed > 0 {
-		fmt.Printf("%d of %d rungs failed — do not trust a measurement from this install yet.\n", failed, len(rungs))
 		return 1
 	}
-	fmt.Printf("all %d rungs pass — the offload rig is live.\n", len(rungs))
 	return 0
+}
+
+// renderDoctor writes the report to w and returns the count of failed rungs.
+// When jsonMode is true it emits a single JSON object; otherwise it prints
+// the human-readable ladder. The collection/rendering split keeps cmdDoctor
+// thin and makes renderDoctor directly testable with fabricated rungs.
+func renderDoctor(w io.Writer, rungs []rung, jsonMode bool) int {
+	failed := 0
+	if jsonMode {
+		for _, r := range rungs {
+			if r.status == rungFail {
+				failed++
+			}
+		}
+		result := doctorResult{
+			Ok:    failed == 0,
+			Rungs: make([]rungResult, len(rungs)),
+		}
+		for i, r := range rungs {
+			result.Rungs[i] = rungResult{
+				Name:   r.name,
+				Status: r.status.jsonTag(),
+				Detail: r.detail,
+				Fix:    r.fix,
+			}
+		}
+		b, _ := json.MarshalIndent(result, "", "  ")
+		fmt.Fprintln(w, string(b))
+		return failed
+	}
+
+	for _, r := range rungs {
+		fmt.Fprintf(w, "%-4s  %-18s  %s\n", r.status.label(), r.name, r.detail)
+		if r.status == rungFail {
+			failed++
+			fmt.Fprintf(w, "      %-18s  fix: %s\n", "", r.fix)
+		}
+	}
+	fmt.Fprintln(w)
+	if failed > 0 {
+		fmt.Fprintf(w, "%d of %d rungs failed — do not trust a measurement from this install yet.\n", failed, len(rungs))
+	} else {
+		fmt.Fprintf(w, "all %d rungs pass — the offload rig is live.\n", len(rungs))
+	}
+	return failed
 }
 
 // --- rung 1: config -------------------------------------------------------

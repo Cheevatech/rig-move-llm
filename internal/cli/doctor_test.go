@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -354,5 +355,125 @@ func mustWrite(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// JSON output: renderDoctor must produce valid, structured JSON when jsonMode
+// is true, and the existing human-readable ladder when it is false.
+func TestJSONRender(t *testing.T) {
+	t.Run("all pass — ok true, no fixes, valid JSON", func(t *testing.T) {
+		rungs := []rung{
+			{name: "config", status: rungPass, detail: "enabled"},
+			{name: "guards", status: rungPass, detail: "stall < wall"},
+			{name: "cc engine", status: rungSkip, detail: "not configured"},
+		}
+		var buf strings.Builder
+		failed := renderDoctor(&buf, rungs, true)
+
+		if failed != 0 {
+			t.Fatalf("want 0 failed, got %d", failed)
+		}
+
+		var result doctorResult
+		if err := json.Unmarshal([]byte(buf.String()), &result); err != nil {
+			t.Fatalf("JSON unmarshal failed: %v", err)
+		}
+		if !result.Ok {
+			t.Error("want ok=true")
+		}
+		if len(result.Rungs) != 3 {
+			t.Errorf("want 3 rungs, got %d", len(result.Rungs))
+		}
+		for _, r := range result.Rungs {
+			if r.Name == "" {
+				t.Error("name should be non-empty")
+			}
+			if r.Status != "pass" && r.Status != "fail" && r.Status != "skip" {
+				t.Errorf("invalid status: %s", r.Status)
+			}
+			if r.Fix != "" {
+				t.Errorf("pass/skip rungs should not have fix: %q", r.Fix)
+			}
+		}
+
+		trimmed := strings.TrimSpace(buf.String())
+		if !strings.HasPrefix(trimmed, "{") {
+			t.Error("should start with {")
+		}
+		if !strings.HasSuffix(trimmed, "}") {
+			t.Error("should end with }")
+		}
+	})
+
+	t.Run("a failing rung — ok false, status fail, fix present", func(t *testing.T) {
+		rungs := []rung{
+			{name: "config", status: rungPass, detail: "ok"},
+			{name: "worker", status: rungFail, detail: "unreachable", fix: "check endpoint"},
+		}
+		var buf strings.Builder
+		failed := renderDoctor(&buf, rungs, true)
+
+		if failed != 1 {
+			t.Fatalf("want 1 failed, got %d", failed)
+		}
+
+		var result doctorResult
+		if err := json.Unmarshal([]byte(buf.String()), &result); err != nil {
+			t.Fatalf("JSON unmarshal failed: %v", err)
+		}
+		if result.Ok {
+			t.Error("want ok=false")
+		}
+		failRung := result.Rungs[1]
+		if failRung.Status != "fail" {
+			t.Errorf("want status fail, got %s", failRung.Status)
+		}
+		if failRung.Fix != "check endpoint" {
+			t.Errorf("want fix, got %q", failRung.Fix)
+		}
+	})
+}
+
+func TestTextRender(t *testing.T) {
+	t.Run("text mode still prints human ladder", func(t *testing.T) {
+		rungs := []rung{
+			{name: "config", status: rungPass, detail: "enabled"},
+			{name: "worker", status: rungFail, detail: "unreachable", fix: "check"},
+		}
+		var buf strings.Builder
+		failed := renderDoctor(&buf, rungs, false)
+
+		if failed != 1 {
+			t.Fatalf("want 1 failed, got %d", failed)
+		}
+
+		out := buf.String()
+		if !strings.Contains(out, "PASS") {
+			t.Error("should contain PASS")
+		}
+		if !strings.Contains(out, "FAIL") {
+			t.Error("should contain FAIL")
+		}
+		if !strings.Contains(out, "fix:") {
+			t.Error("should contain fix line")
+		}
+
+		trimmed := strings.TrimSpace(out)
+		if strings.HasPrefix(trimmed, "{") {
+			t.Error("text mode should not output JSON")
+		}
+	})
+}
+
+// jsonTag maps rungStatus to the lowercase strings used in JSON output.
+func TestRungStatusJSONTag(t *testing.T) {
+	if rungPass.jsonTag() != "pass" {
+		t.Errorf("rungPass.jsonTag() = %q, want \"pass\"", rungPass.jsonTag())
+	}
+	if rungFail.jsonTag() != "fail" {
+		t.Errorf("rungFail.jsonTag() = %q, want \"fail\"", rungFail.jsonTag())
+	}
+	if rungSkip.jsonTag() != "skip" {
+		t.Errorf("rungSkip.jsonTag() = %q, want \"skip\"", rungSkip.jsonTag())
 	}
 }

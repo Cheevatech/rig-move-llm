@@ -66,6 +66,67 @@ func TestRoundBudget_ClearTurnReopensTheBudget(t *testing.T) {
 	}
 }
 
+// MAIN must be able to tell "out of budget" apart from any other refusal,
+// and must know the knob that raises it — so the denial message names the
+// round, the cap, and the environment variable.
+func TestRoundBudget_DenialMessageNamesRoundCapAndOverride(t *testing.T) {
+	s := budgetState(t, 3)
+
+	// Spend the budget.
+	for i := 1; i <= 3; i++ {
+		if denied, _ := preDecision(t, s, implementCall); denied {
+			t.Fatalf("round %d must be allowed within a budget of 3", i)
+		}
+	}
+
+	// The 4th call is denied — inspect the reason.
+	denied, out := preDecision(t, s, implementCall)
+	if !denied {
+		t.Fatal("the 4th delegation must be denied")
+	}
+
+	for _, want := range []string{
+		"delegate call 4",         // the round number of the refused call
+		"the limit is 3",          // the cap
+		"RIG_MAX_DELEGATE_ROUNDS", // the override knob
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("deny reason missing %q; out=%q", want, out)
+		}
+	}
+}
+
+// Exercised at the default cap of 3 (not 1) to prove the reset is a true
+// reset, not an off-by-one carry.
+func TestRoundBudget_CounterDoesNotLeakAcrossTurns(t *testing.T) {
+	s := budgetState(t, 3)
+
+	// Spend all 3 rounds.
+	for i := 1; i <= 3; i++ {
+		if denied, _ := preDecision(t, s, implementCall); denied {
+			t.Fatalf("round %d must be allowed", i)
+		}
+	}
+	// The 4th is denied.
+	if denied, _ := preDecision(t, s, implementCall); !denied {
+		t.Fatal("the 4th delegation must be denied")
+	}
+
+	// Clear the turn — simulates the human's next message.
+	gatestate.ClearTurn(s.StateDir)
+
+	// A full fresh budget of 3 must be available.
+	for i := 1; i <= 3; i++ {
+		if denied, out := preDecision(t, s, implementCall); denied {
+			t.Fatalf("new turn round %d must be allowed; out=%q", i, out)
+		}
+	}
+	// And the 4th of the new turn must be denied again.
+	if denied, _ := preDecision(t, s, implementCall); !denied {
+		t.Fatal("the 4th delegation of the new turn must be denied")
+	}
+}
+
 // A denied round must not have side effects: freezing a contract or closing the
 // repair window on a call that never ran would corrupt the state MAIN reasons
 // from.

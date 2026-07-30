@@ -220,6 +220,21 @@ func applyInit(o initOpts) int {
 		fmt.Println("wrote auto-discovered MCP config", rootMCP)
 	}
 
+	// 4b. Keep rig's own files out of git's view of the user's work. They are
+	// wiring, not changes: an untracked .claude/ and .mcp.json otherwise show up
+	// in the worker's returned diff as if the worker had authored them (#26), and
+	// `git stash -u` — which the proof-retry protocol uses to reach a red state —
+	// would sweep away the hook config mid-round. .git/info/exclude is the right
+	// home: it is local and never committed, so rig does not edit a .gitignore the
+	// user owns and shares.
+	if canon, err := config.CanonicalPath("."); err == nil {
+		if added, err := excludeRigArtifacts(canon); err != nil {
+			fmt.Fprintln(os.Stderr, "init: git exclude:", err)
+		} else if added > 0 {
+			fmt.Printf("excluded %d rig path(s) from git in %s\n", added, filepath.Join(".git", "info", "exclude"))
+		}
+	}
+
 	// 4d. Output style = the persistent, SYSTEM-PROMPT-tier terse-delegate workflow
 	// (no-flag equivalent of P9's --append-system-prompt). wireSettings activates it.
 	stylePath := filepath.Join(claudeDir, "output-styles", "rig-delegate.md")

@@ -47,6 +47,10 @@ func TestCCProofOutcome(t *testing.T) {
 		{"1 passed in 0.1s", false, "green"},
 		{"5 passed, 2 warnings in 0.3s", false, "green"},
 		{"collecting ...", false, ""},
+		{"ERROR rig_proof_test.py - ModuleNotFoundError: No module named 'x'", false, "red"},
+		{"ImportError: cannot import name 'x'", false, "red"},
+		{"FileNotFoundError: [Errno 2] No such file or directory: 'new.py'", false, "red"},
+		{"3 passed in 0.1s\nERRORS during collection\nModuleNotFoundError: No module named 'x'", false, "red"}, // mixed run: red wins over " passed"
 	} {
 		if got := ccProofOutcome(tc.txt, tc.isErr); got != tc.want {
 			t.Errorf("ccProofOutcome(%q, %v) = %q, want %q", tc.txt, tc.isErr, got, tc.want)
@@ -213,5 +217,72 @@ func TestCCLeftoverProofFileIsRemovedAndUnproven(t *testing.T) {
 	}
 	if strings.Contains(res.Diff, ccProofFile) {
 		t.Errorf("proof file leaked into the diff: %v", res.FilesChanged)
+	}
+}
+
+func TestCCProofGreenfieldFlip(t *testing.T) {
+	cmd := "./.venv/bin/python -m pytest -q rig_proof_test.py"
+	p := parseProof(t,
+		proofEvent("a", cmd)+
+			proofResult("a", "ERROR rig_proof_test.py - ModuleNotFoundError: No module named 'newmod'", true)+
+			proofEvent("b", cmd)+
+			proofResult("b", "1 passed in 0.02s", false))
+	if !p.Flip {
+		t.Fatal("greenfield task must be able to prove red->green: the missing-module failure IS the red state")
+	}
+	repo := t.TempDir() // no proof file on disk
+	if !ccProofComplete(repo, p) {
+		t.Fatal("greenfield flip with no leftover proof file should be complete")
+	}
+}
+
+func TestCCProofGreenfieldRedWithoutIsError(t *testing.T) {
+	cmd := "./.venv/bin/python -m pytest -q rig_proof_test.py"
+	p := parseProof(t,
+		proofEvent("a", cmd)+
+			proofResult("a", "ERROR rig_proof_test.py - ImportError: cannot import name 'thing'", false)+
+			proofEvent("b", cmd)+
+			proofResult("b", "1 passed in 0.02s", false))
+	if !p.Flip {
+		t.Fatal("textual greenfield patterns alone must be enough for CC versions that do not set is_error")
+	}
+}
+
+func TestCCProofNeverPairsAcrossSessions(t *testing.T) {
+	cmd := "./.venv/bin/python -m pytest -q rig_proof_test.py"
+	// Session one: only the red
+	p1 := parseProof(t,
+		proofEvent("a", cmd)+
+			proofResult("a", "ERROR rig_proof_test.py - ModuleNotFoundError: No module named 'newmod'", true))
+	if p1.Flip {
+		t.Fatal("lone red must not produce a flip")
+	}
+	// Session two: only the green
+	p2 := parseProof(t,
+		proofEvent("b", cmd)+
+			proofResult("b", "1 passed in 0.02s", false))
+	if p2.Flip {
+		t.Fatal("a stale red from an earlier spawn must never legitimize a later lone green")
+	}
+}
+
+func TestCCProofContractText(t *testing.T) {
+	// ccSystemPrompt must contain the greenfield ordering instructions
+	for _, substr := range []string{"BEFORE your first edit", "GREENFIELD", "ModuleNotFoundError"} {
+		if !strings.Contains(ccSystemPrompt, substr) {
+			t.Errorf("ccSystemPrompt missing required substring: %q", substr)
+		}
+	}
+	// ccProofRetryInstr must contain stash commands, but NOT destructive reset patterns
+	for _, substr := range []string{"git stash push -u", "git stash pop"} {
+		if !strings.Contains(ccProofRetryInstr, substr) {
+			t.Errorf("ccProofRetryInstr missing required substring: %q", substr)
+		}
+	}
+	// "git checkout -- ." appears only in a parenthetical contrast ("a plain `git checkout -- .` cannot
+	// revert an untracked new file"), not as the actual instruction — so we don't assert its absence.
+	// What matters is it does NOT carry the other destructive pattern:
+	if strings.Contains(ccProofRetryInstr, "git diff > /tmp/rig_fix.patch") {
+		t.Error("ccProofRetryInstr must NOT contain: \"git diff > /tmp/rig_fix.patch\"")
 	}
 }

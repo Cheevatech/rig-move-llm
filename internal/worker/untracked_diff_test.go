@@ -87,12 +87,17 @@ func TestCollectDiffExcludesIgnoredAndRigFiles(t *testing.T) {
 	write(t, repo, ".gate/repro.py", "assert False\n")
 	write(t, repo, ".gate.frozen/repro.py", "assert False\n")
 	write(t, repo, ".rig-move-llm/config.env", "ENABLED=true\n")
+	write(t, repo, ".claude/settings.json", "{}\n")
+	write(t, repo, ".claude/output-styles/rig-delegate.md", "style\n")
+	write(t, repo, ".mcp.json", "{}\n")
 	write(t, repo, ccProofFile, "def test_x(): pass\n")
 	write(t, repo, "real.py", "z = 1\n")
 
 	diff, files := (&Engine{}).collectDiff(context.Background(), repo)
 
-	for _, unwanted := range []string{"build/out.o", ".gate/repro.py", ".gate.frozen/repro.py", ".rig-move-llm/config.env", ccProofFile} {
+	for _, unwanted := range []string{"build/out.o", ".gate/repro.py", ".gate.frozen/repro.py",
+		".rig-move-llm/config.env", ".claude/settings.json", ".claude/output-styles/rig-delegate.md",
+		".mcp.json", ccProofFile} {
 		for _, f := range files {
 			if f == unwanted {
 				t.Errorf("%s must not be reported as the worker's change", unwanted)

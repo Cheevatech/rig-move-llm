@@ -127,6 +127,7 @@ func cmdDoctor(args []string) int {
 		checkWorkerEndpoint(cfg),
 		checkCCEngine(cfg),
 		checkWorkspaceTrust(cwd),
+		checkHookResolvable(),
 		checkHookLive(),
 		checkGateToolchain(cwd),
 		checkGuards(),
@@ -312,7 +313,164 @@ func checkWorkspaceTrust(cwd string) rung {
 	return pass(name, "granted for "+cwd)
 }
 
-// --- rung 5: the hook actually fires --------------------------------------
+// commandMentionsRig reports whether a command string references the rig binary.
+func commandMentionsRig(cmd string) bool {
+	return strings.Contains(cmd, "rig-move-llm")
+}
+
+// getSettingsPaths returns all candidate settings.json and settings.local.json
+// paths for the given repo and home directories. Only paths that actually exist
+// are included.
+func getSettingsPaths(repo, home string) []string {
+	var paths []string
+	for _, base := range []string{repo, home} {
+		for _, name := range []string{"settings.json", "settings.local.json"} {
+			p := filepath.Join(base, ".claude", name)
+			if _, err := os.Stat(p); err == nil {
+				paths = append(paths, p)
+			}
+		}
+	}
+	return paths
+}
+
+// --- rung 5: rig hook commands are resolvable on PATH ----------------------
+
+// checkHookResolvable ensures the hook commands configured in settings.json
+// can actually be found as executables. The hook-live rung invokes the rig
+// binary directly via os.Executable(), so it passes even when the configured
+// hook command (the string in settings.json) is not on PATH. This rung catches
+// the "nothing was delegated" state: hooks wired with a command that doesn't
+// resolve, or no rig hooks at all.
+func checkHookResolvable() rung {
+	cwd, _ := os.Getwd()
+	home, _ := os.UserHomeDir()
+	return checkHookResolvableIn(cwd, home)
+}
+
+func checkHookResolvableIn(repo, home string) rung {
+	const name = "hook resolvable"
+
+	settingsPaths := getSettingsPaths(repo, home)
+
+	var rigCommands []struct {
+		cmd  string
+		file string
+	}
+	for _, sp := range settingsPaths {
+		data, err := os.ReadFile(sp)
+		if err != nil {
+			continue
+		}
+		var settings map[string]any
+		if json.Unmarshal(data, &settings) != nil {
+			continue
+		}
+		hooks, ok := settings["hooks"].(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, entriesAny := range hooks {
+			entries, ok := entriesAny.([]any)
+			if !ok {
+				continue
+			}
+			for _, e := range entries {
+				m, ok := e.(map[string]any)
+				if !ok {
+					continue
+				}
+				inner, ok := m["hooks"].([]any)
+				if !ok {
+					continue
+				}
+				for _, h := range inner {
+					hm, ok := h.(map[string]any)
+					if !ok {
+						continue
+					}
+					cmd, ok := hm["command"].(string)
+					if !ok {
+						continue
+					}
+					if commandMentionsRig(cmd) {
+						rigCommands = append(rigCommands, struct {
+							cmd  string
+							file string
+						}{cmd: cmd, file: sp})
+					}
+				}
+			}
+		}
+	}
+
+	if len(rigCommands) == 0 {
+		return fail(name,
+			"no rig-move-llm hook commands found in any settings file — the offload rig has nothing to delegate through",
+			"run `rig-move-llm init` to wire the hooks into .claude/settings.json")
+	}
+
+	for _, rc := range rigCommands {
+		// Simple field split — this does not handle complex shell quoting, but
+		// rig's own hook commands never use quotes, and this is a diagnostic,
+		// not a shell.
+		words := strings.Fields(rc.cmd)
+		if len(words) == 0 {
+			continue
+		}
+		cmdWord := words[0]
+		if !resolveCommand(cmdWord) {
+			return fail(name,
+				fmt.Sprintf("command %q (in %s) cannot be resolved as an executable", rc.cmd, rc.file),
+				"ensure the binary is installed and on PATH, or run `rig-move-llm init` to repair the hook wiring")
+		}
+	}
+
+	return pass(name, fmt.Sprintf("%d rig hook command(s) resolve to executables", len(rigCommands)))
+}
+
+// resolveCommand checks whether a command word can be found as an executable.
+// If it contains a "/" it is treated as a path (absolute or relative to cwd);
+// otherwise it is looked up on PATH.
+func resolveCommand(cmdWord string) bool {
+	if strings.Contains(cmdWord, "/") {
+		// Treat as a path: absolute or relative to cwd.
+		if !filepath.IsAbs(cmdWord) {
+			cwd, _ := os.Getwd()
+			cmdWord = filepath.Join(cwd, cmdWord)
+		}
+		st, err := os.Stat(cmdWord)
+		if err != nil {
+			return false
+		}
+		if st.IsDir() {
+			return false
+		}
+		return st.Mode()&0o111 != 0
+	}
+
+	// Bare name: look it up on PATH.
+	path := os.Getenv("PATH")
+	if path == "" {
+		return false
+	}
+	for _, dir := range filepath.SplitList(path) {
+		candidate := filepath.Join(dir, cmdWord)
+		st, err := os.Stat(candidate)
+		if err != nil {
+			continue
+		}
+		if st.IsDir() {
+			continue
+		}
+		if st.Mode()&0o111 != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// --- rung 6: the hook actually fires --------------------------------------
 
 // checkHookLive feeds a MAIN Bash payload through rig's own hook and requires a
 // deny. The presence of hook entries in .claude/settings.json proves nothing:

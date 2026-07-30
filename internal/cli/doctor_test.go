@@ -477,3 +477,256 @@ func TestRungStatusJSONTag(t *testing.T) {
 		t.Errorf("rungSkip.jsonTag() = %q, want \"skip\"", rungSkip.jsonTag())
 	}
 }
+func TestHookResolvableRung(t *testing.T) {
+	setHome := func(t *testing.T) string {
+		t.Helper()
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		return home
+	}
+
+	t.Run("resolvable command passes", func(t *testing.T) {
+		home := setHome(t)
+		repo := t.TempDir()
+		claudeDir := filepath.Join(repo, ".claude")
+		if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		bin := t.TempDir()
+		fake := filepath.Join(bin, "rig-move-llm")
+		mustWrite(t, fake, "#!/bin/sh\necho ok\n")
+		if err := os.Chmod(fake, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		settings := map[string]any{
+			"hooks": map[string]any{
+				"PreToolUse": []any{map[string]any{
+					"matcher": "*",
+					"hooks": []any{
+						map[string]any{"type": "command", "command": fake + " hook pre-tool"},
+					},
+				}},
+			},
+		}
+		settingsJSON, _ := json.MarshalIndent(settings, "", "  ")
+		mustWrite(t, filepath.Join(claudeDir, "settings.json"), string(settingsJSON))
+
+		r := checkHookResolvableIn(repo, home)
+		if r.status != rungPass {
+			t.Fatalf("status = %s, want PASS (%s)", r.status.label(), r.detail)
+		}
+	})
+
+	t.Run("unresolvable command fails with command and file named", func(t *testing.T) {
+		home := setHome(t)
+		repo := t.TempDir()
+		claudeDir := filepath.Join(repo, ".claude")
+		if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		settings := map[string]any{
+			"hooks": map[string]any{
+				"PreToolUse": []any{map[string]any{
+					"matcher": "*",
+					"hooks": []any{
+						map[string]any{"type": "command", "command": "rig-move-llm-does-not-exist --hook"},
+					},
+				}},
+			},
+		}
+		settingsJSON, _ := json.MarshalIndent(settings, "", "  ")
+		settingsPath := filepath.Join(claudeDir, "settings.json")
+		mustWrite(t, settingsPath, string(settingsJSON))
+
+		r := checkHookResolvableIn(repo, home)
+
+		if r.status != rungFail {
+			t.Fatalf("status = %s, want FAIL (%s)", r.status.label(), r.detail)
+		}
+		if !strings.Contains(r.detail, "rig-move-llm-does-not-exist") {
+			t.Errorf("detail must name the offending command:\n%s", r.detail)
+		}
+		if !strings.Contains(r.detail, settingsPath) {
+			t.Errorf("detail must name the settings file:\n%s", r.detail)
+		}
+	})
+
+	t.Run("bare name on PATH resolves", func(t *testing.T) {
+		home := setHome(t)
+		repo := t.TempDir()
+		claudeDir := filepath.Join(repo, ".claude")
+		if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		settings := map[string]any{
+			"hooks": map[string]any{
+				"PreToolUse": []any{map[string]any{
+					"matcher": "*",
+					"hooks": []any{
+						map[string]any{"type": "command", "command": "rig-move-llm hook pre-tool"},
+					},
+				}},
+			},
+		}
+		settingsJSON, _ := json.MarshalIndent(settings, "", "  ")
+		mustWrite(t, filepath.Join(claudeDir, "settings.json"), string(settingsJSON))
+
+		// Create executable and put its dir on PATH.
+		bin := t.TempDir()
+		fake := filepath.Join(bin, "rig-move-llm")
+		mustWrite(t, fake, "#!/bin/sh\necho ok\n")
+		if err := os.Chmod(fake, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", bin+string(filepath.ListSeparator)+os.Getenv("PATH"))
+
+		if r := checkHookResolvableIn(repo, home); r.status != rungPass {
+			t.Fatalf("bare name on PATH should pass: status = %s (%s)", r.status.label(), r.detail)
+		}
+
+		// Now remove that dir from PATH and expect failure.
+		t.Setenv("PATH", t.TempDir())
+		if r := checkHookResolvableIn(repo, home); r.status != rungFail {
+			t.Fatalf("bare name off PATH should fail: status = %s (%s)", r.status.label(), r.detail)
+		}
+	})
+
+	t.Run("non-executable file fails", func(t *testing.T) {
+		home := setHome(t)
+		repo := t.TempDir()
+		claudeDir := filepath.Join(repo, ".claude")
+		if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		bin := t.TempDir()
+		notExec := filepath.Join(bin, "rig-move-llm")
+		mustWrite(t, notExec, "#!/bin/sh\necho not-exec\n")
+		// Deliberately leave mode at 0644 (not executable).
+
+		settings := map[string]any{
+			"hooks": map[string]any{
+				"PreToolUse": []any{map[string]any{
+					"matcher": "*",
+					"hooks": []any{
+						map[string]any{"type": "command", "command": notExec + " hook pre-tool"},
+					},
+				}},
+			},
+		}
+		settingsJSON, _ := json.MarshalIndent(settings, "", "  ")
+		mustWrite(t, filepath.Join(claudeDir, "settings.json"), string(settingsJSON))
+
+		r := checkHookResolvableIn(repo, home)
+
+		if r.status != rungFail {
+			t.Fatalf("non-executable file should fail: status = %s (%s)", r.status.label(), r.detail)
+		}
+	})
+
+	t.Run("no rig hooks configured fails", func(t *testing.T) {
+		home := setHome(t)
+		repo := t.TempDir()
+		claudeDir := filepath.Join(repo, ".claude")
+		if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		// Settings with no hooks at all.
+		mustWrite(t, filepath.Join(claudeDir, "settings.json"), `{"permissions":{"allow":[]}}`)
+
+		r := checkHookResolvableIn(repo, home)
+
+		if r.status != rungFail {
+			t.Fatalf("no hooks should fail: status = %s (%s)", r.status.label(), r.detail)
+		}
+		if !strings.Contains(r.detail, "no rig-move-llm hook") {
+			t.Errorf("detail should say no rig hooks found:\n%s", r.detail)
+		}
+	})
+
+	t.Run("empty hooks fails", func(t *testing.T) {
+		home := setHome(t)
+		repo := t.TempDir()
+		claudeDir := filepath.Join(repo, ".claude")
+		if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		// Settings with empty hooks object.
+		mustWrite(t, filepath.Join(claudeDir, "settings.json"), `{"hooks":{}}`)
+
+		r := checkHookResolvableIn(repo, home)
+
+		if r.status != rungFail {
+			t.Fatalf("empty hooks should fail: status = %s (%s)", r.status.label(), r.detail)
+		}
+	})
+
+	t.Run("settings.local.json with unresolvable command fails", func(t *testing.T) {
+		home := setHome(t)
+		repo := t.TempDir()
+		claudeDir := filepath.Join(repo, ".claude")
+		if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		settings := map[string]any{
+			"hooks": map[string]any{
+				"PreToolUse": []any{map[string]any{
+					"matcher": "*",
+					"hooks": []any{
+						map[string]any{"type": "command", "command": "rig-move-llm-fake-local --hook"},
+					},
+				}},
+			},
+		}
+		settingsJSON, _ := json.MarshalIndent(settings, "", "  ")
+		settingsLocalPath := filepath.Join(claudeDir, "settings.local.json")
+		mustWrite(t, settingsLocalPath, string(settingsJSON))
+
+		r := checkHookResolvableIn(repo, home)
+
+		if r.status != rungFail {
+			t.Fatalf("status = %s, want FAIL (%s)", r.status.label(), r.detail)
+		}
+		if !strings.Contains(r.detail, "rig-move-llm-fake-local") {
+			t.Errorf("detail must name the offending command:\n%s", r.detail)
+		}
+		if !strings.Contains(r.detail, "settings.local.json") {
+			t.Errorf("detail must name the settings.local.json path:\n%s", r.detail)
+		}
+	})
+
+	t.Run("hooks from other tools only fails", func(t *testing.T) {
+		home := setHome(t)
+		repo := t.TempDir()
+		claudeDir := filepath.Join(repo, ".claude")
+		if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		settings := map[string]any{
+			"hooks": map[string]any{
+				"PreToolUse": []any{map[string]any{
+					"matcher": "*",
+					"hooks": []any{
+						map[string]any{"type": "command", "command": "some-other-tool do-something"},
+					},
+				}},
+			},
+		}
+		settingsJSON, _ := json.MarshalIndent(settings, "", "  ")
+		mustWrite(t, filepath.Join(claudeDir, "settings.json"), string(settingsJSON))
+
+		r := checkHookResolvableIn(repo, home)
+
+		if r.status != rungFail {
+			t.Fatalf("non-rig hooks should fail: status = %s (%s)", r.status.label(), r.detail)
+		}
+	})
+}

@@ -19,6 +19,14 @@ import (
 func cmdSessionStart(r io.Reader, w io.Writer) int {
 	_, _ = io.Copy(io.Discard, r) // drain the payload; we only need the cwd
 
+	// The worker's own `claude -p` session fires this hook as well (#27). Creating
+	// a project scope is a decision about the USER's workspace, so it belongs to
+	// the MAIN leg only — a worker session must leave the layout it was handed
+	// exactly as it found it.
+	if inWorkerSession() {
+		return 0
+	}
+
 	projDir := os.Getenv("CLAUDE_PROJECT_DIR")
 	if projDir == "" {
 		projDir, _ = os.Getwd()

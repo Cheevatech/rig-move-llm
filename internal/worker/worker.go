@@ -424,9 +424,40 @@ func (e *Engine) chat(ctx context.Context, msgs []translate.OpenAIMessage, tools
 	return out, toks, nil
 }
 
+// diffRescueTimeout bounds the git calls of a diff collected AFTER the round's
+// own context died. It is short on purpose: reading what is already on disk is
+// cheap, and this must never become a way for a killed round to keep running.
+const diffRescueTimeout = 30 * time.Second
+
+// diffCtx returns a context the diff can actually be read with. When the round's
+// ctx is still live it is used unchanged; when it is already done, the calls are
+// detached onto a fresh, short-lived one.
+//
+// The two callers that need the diff MOST are exactly the ones whose ctx is dead:
+// a round killed by the engine wall guard or by the client watchdog. Propagating
+// that cancellation into git made every timeout return diff:"" and
+// files_changed:[] — so the timeout diagnosis promised "any diff below is the
+// partial work it had already written" and then handed MAIN nothing. Measured
+// 2026-07-30 (map13 volley 3, task11): a cc round wrote two real files (19 KB +
+// 23 KB) and streamed worker traffic until the moment it was killed; rig
+// reported files=[], MAIN read that as "the worker did nothing" and re-delegated
+// into the same wall — 57 min and $1.20 for a return that was empty by
+// construction. Work on disk must survive the cancellation that stopped it.
+func diffCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx.Err() == nil {
+		return ctx, func() {}
+	}
+	// WithoutCancel keeps any values on the round's context while dropping its
+	// dead deadline (Go 1.21).
+	return context.WithTimeout(context.WithoutCancel(ctx), diffRescueTimeout)
+}
+
 // collectDiff returns the repo's uncommitted diff and the list of changed paths.
 // Non-git repos yield empty strings (the gate is what actually judges the run).
 func (e *Engine) collectDiff(ctx context.Context, repo string) (string, []string) {
+	ctx, cancel := diffCtx(ctx)
+	defer cancel()
+
 	diff := gitOut(ctx, repo, "diff")
 	names := gitOut(ctx, repo, "diff", "--name-only")
 	var files []string

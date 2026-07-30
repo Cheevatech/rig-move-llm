@@ -435,7 +435,75 @@ func (e *Engine) collectDiff(ctx context.Context, repo string) (string, []string
 			files = append(files, l)
 		}
 	}
+
+	// `git diff` reports TRACKED files only, so a worker that CREATES files
+	// returned an empty diff and files_changed: [] — indistinguishable from doing
+	// nothing (#26). MAIN cannot review work it is told does not exist, so it
+	// re-delegated instead; measured on a docs task that wrote a real 5 KB file
+	// and still took three rounds. New files are the whole payload of a greenfield
+	// task, so they belong in the change rig hands back.
+	untrackedDiff, untrackedFiles := e.collectUntracked(ctx, repo)
+	diff += untrackedDiff
+	files = append(files, untrackedFiles...)
 	return diff, files
+}
+
+// untrackedDiffBudget caps how many bytes of NEW-file content enter the return.
+// A worker that accidentally leaves a build dir or a venv behind (unignored)
+// would otherwise blow up the payload MAIN is billed to read. Whatever is
+// dropped is named, never silently omitted.
+const untrackedDiffBudget = 256 * 1024
+
+// collectUntracked renders every untracked, non-ignored file as a git-format
+// addition diff. It reads with `git diff --no-index`, which produces the same
+// "new file mode" hunks review already knows how to read WITHOUT touching the
+// index — `git add -N` would have been shorter, but the index belongs to the
+// user, not to rig.
+func (e *Engine) collectUntracked(ctx context.Context, repo string) (string, []string) {
+	out := gitOut(ctx, repo, "ls-files", "--others", "--exclude-standard")
+	var (
+		diff  strings.Builder
+		files []string
+		spent int
+		over  []string
+	)
+	for _, path := range strings.Split(strings.TrimSpace(out), "\n") {
+		path = strings.TrimSpace(path)
+		if path == "" || skipUntracked(path) {
+			continue
+		}
+		if spent >= untrackedDiffBudget {
+			over = append(over, path)
+			continue
+		}
+		d := gitOut(ctx, repo, "diff", "--no-index", "--", os.DevNull, path)
+		if d == "" {
+			continue
+		}
+		spent += len(d)
+		diff.WriteString(d)
+		files = append(files, path)
+	}
+	if len(over) > 0 {
+		// Named, not hidden: a truncated return that reads as complete is how a
+		// review signs off on work it never saw.
+		diff.WriteString(fmt.Sprintf("\n[rig] %d further new file(s) omitted from this diff (over the %d KB new-file budget): %s\n",
+			len(over), untrackedDiffBudget/1024, strings.Join(over, ", ")))
+		files = append(files, over...)
+	}
+	return diff.String(), files
+}
+
+// skipUntracked drops paths that are rig's own machinery rather than the
+// worker's work: the frozen gate contract (whose whole point is that it is not
+// part of the change under review) and a leftover proof test.
+func skipUntracked(path string) bool {
+	for _, prefix := range []string{".gate/", ".gate.frozen/", ".rig-move-llm/"} {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return path == ccProofFile
 }
 
 func gitOut(ctx context.Context, repo string, args ...string) string {

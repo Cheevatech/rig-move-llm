@@ -497,13 +497,18 @@ func (e *Engine) collectUntracked(ctx context.Context, repo string) (string, []s
 // skipUntracked drops paths that are rig's own machinery rather than the
 // worker's work: the frozen gate contract (whose whole point is that it is not
 // part of the change under review) and a leftover proof test.
+// It is belt-and-braces with the .git/info/exclude entries init writes: an
+// install that predates them, or a repo the user wired by hand, must still not
+// have rig's wiring reported back as the worker's work (measured — a docs task
+// returned .claude/settings.json, .mcp.json and both output styles as files the
+// worker had changed).
 func skipUntracked(path string) bool {
-	for _, prefix := range []string{".gate/", ".gate.frozen/", ".rig-move-llm/"} {
+	for _, prefix := range []string{".gate/", ".gate.frozen/", ".rig-move-llm/", ".claude/"} {
 		if strings.HasPrefix(path, prefix) {
 			return true
 		}
 	}
-	return path == ccProofFile
+	return path == ccProofFile || path == ".mcp.json"
 }
 
 func gitOut(ctx context.Context, repo string, args ...string) string {

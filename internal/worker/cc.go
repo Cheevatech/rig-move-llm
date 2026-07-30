@@ -52,12 +52,17 @@ func ccEnabled() bool {
 const ccSystemPrompt = `You are a code-fixing worker operating directly on a repository checkout.
 Resolve the task by editing files and verifying with the repro/test command in the task.
 Workflow — proof-of-flip is MANDATORY, in this order:
-1. Before touching source, write a regression test file named rig_proof_test.py at the repo
-   root that asserts the EXPECTED behaviour from the task. When the task states an expected
-   value or output, assert it concretely — "does not crash" alone is not a proof then.
+1. BEFORE your first edit to any file — before creating a new file too — write a regression
+   test file named rig_proof_test.py at the repo root that asserts the EXPECTED behaviour from
+   the task. When the task states an expected value or output, assert it concretely — "does not
+   crash" alone is not a proof then.
 2. Run it with the repo's test runner (e.g. ./.venv/bin/python -m pytest -q rig_proof_test.py).
    It MUST FAIL. If it passes, it does not capture the bug — rewrite it until it fails.
-3. Make the MINIMAL source edit that fixes the bug.
+   GREENFIELD: when the task is to CREATE code that does not exist yet, do NOT skip this run
+   because "there is nothing to break yet". Import/exercise the not-yet-existing module or file
+   anyway: the resulting ModuleNotFoundError / ImportError / FileNotFoundError / collection
+   error IS the required red state, and it is the only red a greenfield task can produce.
+3. Make the MINIMAL source edit that fixes the bug (or creates the requested code).
 4. Rerun the SAME test command byte-for-byte. It MUST PASS now.
 5. Run the full test file(s) covering the code you changed and resolve any fallout you caused.
 6. Delete rig_proof_test.py so the tree carries the source fix only.
@@ -69,16 +74,21 @@ refactor, rename, or "improve" anything you were not asked to change. Do not com
 
 // ccProofRetryInstr is the single worker-side retry (P5 fixup shape: one shot,
 // decided by the engine, MAIN never re-enters the loop). The fix is already in
-// the tree, so red needs a temporary revert.
+// the tree, so red needs a temporary revert that also removes any files the
+// previous session created (untracked), not just tracked edits.
 const ccProofRetryInstr = `PROOF MISSING: a previous session already applied a fix to this
 working tree but produced no red->green proof-of-flip evidence. Complete the proof now WITHOUT
 redoing the fix:
-1. Save the fix:  git diff > /tmp/rig_fix.patch
-2. Revert:        git checkout -- .
-3. Write rig_proof_test.py at the repo root asserting the EXPECTED behaviour from the task,
-   run it with the repo's test runner (e.g. ./.venv/bin/python -m pytest -q rig_proof_test.py)
-   — it MUST FAIL (red).
-4. Re-apply:      git apply /tmp/rig_fix.patch
+1. Save AND revert the fix in one step:  git stash push -u -m rig-fix
+   (-u also stashes files the previous session CREATED; a plain ` + "`" + `git checkout -- .` + "`" + ` cannot
+   revert an untracked new file, so the red state would be impossible without it.)
+2. Only NOW write rig_proof_test.py at the repo root asserting the EXPECTED behaviour from the
+   task — write it after the stash so it is not part of the stash and cannot conflict on pop.
+3. Run it with the repo's test runner (e.g. ./.venv/bin/python -m pytest -q rig_proof_test.py)
+   — it MUST FAIL (red). If the task was to CREATE new code, the failure is the missing
+   module/file (ModuleNotFoundError / ImportError / FileNotFoundError) — that is the correct red.
+4. Re-apply the fix:  git stash pop
+   If pop reports a conflict, resolve it by KEEPING the stashed version (the fix).
 5. Rerun the SAME test command byte-for-byte — it MUST PASS (green).
 6. Delete rig_proof_test.py, then reply with a short summary ending with the PROOF line.`
 
@@ -664,8 +674,21 @@ func (p *ccProof) observe(cmd, resultText string, isError bool) {
 // ccProofOutcome classifies one proof-test run. is_error mirrors the Bash
 // tool's exit status (pytest exits non-zero on any failure), and the textual
 // patterns back it up for CC versions that do not set the flag.
+// Greenfield red patterns (ModuleNotFoundError, ImportError, etc.) are checked
+// before the green pattern so a mixed run is still classified as red.
 func ccProofOutcome(txt string, isError bool) string {
 	t := strings.ToLower(txt)
+	// Greenfield red: the proof test ran against code that does not exist yet.
+	// Checked before " passed" so a mixed run (other tests passed, the proof test
+	// errored during collection) is still red.
+	for _, pat := range []string{
+		"modulenotfounderror", "importerror", "no such file or directory",
+		"filenotfounderror", "collection error", "errors during collection",
+	} {
+		if strings.Contains(t, pat) {
+			return "red"
+		}
+	}
 	failed := strings.Contains(t, " failed") || strings.Contains(t, "error") ||
 		strings.Contains(t, "traceback")
 	passed := strings.Contains(t, " passed")

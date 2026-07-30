@@ -209,6 +209,15 @@ agent's output small, plus `.rig-move-llm/config.env`.
   `enableAllProjectMcpServers` so the worker server loads without a prompt — see
   [Headless](#headless-claude--p) for the third trust layer a never-opened project still needs).
 
+**Is it actually live?** `rig-move-llm doctor` runs the pre-flight ladder and exits non-zero if any
+rung fails: config + `ENABLED`, a **real completion** against the worker endpoint (a probe against
+`/v1/models` answers 200 on some servers even when the API key is wrong, so it cannot see an auth
+failure), the cc engine's endpoint and CLI, Claude Code's workspace trust, whether the force-delegate
+hook **actually denies** a MAIN `Bash` call, whether the repo's gate command (`go`, `pytest`, `npm`,
+`cargo`) is on **the PATH the worker inherits**, and the effective guard ladder. Run it before you
+trust any measurement — a rig that looks configured can still be delegating nothing, and a worker
+that cannot run your tests can only make claims.
+
 **On / off switch.** `ENABLED` in `config.env` is the master toggle: `false` (the default when you
 skip the worker) means the hook passes every tool through and Claude Code behaves normally; set a
 worker endpoint and `ENABLED=true` to activate the offload — no re-install needed. Flip it from the

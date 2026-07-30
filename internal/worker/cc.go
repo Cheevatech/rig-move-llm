@@ -345,6 +345,15 @@ func ccStallTimeout() time.Duration {
 	return time.Duration(envInt("RIG_CC_STALL_TIMEOUT", 600)) * time.Second
 }
 
+// StallGuard and WallGuard expose the two engine guards for reporting (doctor's
+// guard rung). They are accessors, not knobs: the values still come from the same
+// env overrides the engine itself reads, so what doctor prints is what a round
+// will actually get.
+func StallGuard() time.Duration { return ccStallTimeout() }
+
+// WallGuard is the engine's own end-to-end bound on one implement call.
+func WallGuard() time.Duration { return runTimeout() }
+
 // ccStallCheckInterval is how often the watchdog samples the tracker. It only
 // bounds the overshoot of the kill, not the guard itself, so it stays coarse for
 // the production limit and scales down for the short limits tests use.

@@ -48,6 +48,7 @@ Control
   rig-move-llm disable [--local]           turn offload OFF (Claude Code runs normally)
   rig-move-llm config  [--local] [--open]  show the effective config / open it in $EDITOR
   rig-move-llm stats   [--reset|--history] token accounting / savings
+  rig-move-llm doctor                      prove the offload rig is live before you trust a number
 
 Run
   rig-move-llm run    [--] <command...>    launch a command with the proxy wired in
@@ -112,6 +113,8 @@ func Main(args []string) int {
 		return cmdCascade(rest)
 	case "stats":
 		return cmdStats(rest)
+	case "doctor":
+		return cmdDoctor(rest)
 	case "version", "--version", "-v":
 		fmt.Println("rig-move-llm", Version)
 		return 0

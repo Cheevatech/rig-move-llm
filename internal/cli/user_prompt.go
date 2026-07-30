@@ -24,6 +24,17 @@ import (
 func cmdUserPrompt(r io.Reader, w io.Writer) int {
 	_, _ = io.Copy(io.Discard, r) // drain payload; the decision is config-driven
 
+	// The cc worker runs as its own `claude -p` session in the same project, so it
+	// fires these lifecycle hooks too — and everything below is MAIN-scoped. Left
+	// unguarded, every successful delegation cleared the very per-turn state it
+	// was supposed to be counted in: the triage decision, the Gate B window, and
+	// the delegation budget (#27, measured — the budget could only ever fire when
+	// two dispatches landed between two worker sessions). A worker session has no
+	// intake of its own to reset and no reason to re-probe worker health.
+	if inWorkerSession() {
+		return 0
+	}
+
 	cfg := config.Load()
 	marker := hook.HealthMarkerPath(stateDir(cfg))
 
@@ -64,6 +75,15 @@ func emitFallback(w io.Writer, u string) {
 		"⚠️ rig-move-llm: worker healthcheck failed (%s) — falling back to local Claude for this turn.", u)
 	_ = json.NewEncoder(w).Encode(map[string]any{"systemMessage": msg})
 }
+
+// inWorkerSession reports whether this hook invocation belongs to a worker
+// session rather than the paid MAIN leg. RIG_AGENT_ID is the identity stamp the
+// cc engine puts on its subprocess (#24) and teammate-exec puts on a terminal
+// teammate; MAIN never carries it.
+//
+// The rule this encodes, after two bugs of the same shape: anything a hook does
+// on behalf of MAIN must first establish that it is running as MAIN.
+func inWorkerSession() bool { return os.Getenv("RIG_AGENT_ID") != "" }
 
 // stateDir resolves where the hook keeps its per-scope state (matching
 // buildHookState): RIG_STATE_DIR overrides the config data dir.

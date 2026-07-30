@@ -7,9 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Cheevatech/rig-move-llm/internal/config"
 	"github.com/Cheevatech/rig-move-llm/internal/service"
+	"github.com/Cheevatech/rig-move-llm/internal/worker"
 )
 
 // initOpts is the resolved bootstrap request. Both cmdInit (flag-driven) and the
@@ -352,11 +354,20 @@ func renderConfigEnv(v configEnvVals) string {
 // true it is spawned via `npx -y rig-move-llm worker` (zero global install — npx
 // resolves the published package each spawn); otherwise via the `rig-move-llm`
 // binary on PATH (a global npm/binary install).
+// The entry carries an explicit per-call `timeout` (#33). Two reasons, both
+// measured: it names the client-side wall instead of inheriting the ~28-hour
+// default, and on Claude Code v2.1.203+ a per-server timeout is also a FLOOR on
+// the idle timeout — without it a stdio server that answers only at the end of a
+// long round (which is exactly what the worker does) is aborted after 30 minutes
+// of "idleness" while it is in fact working. rig sizes it above its own wall guard
+// so the engine is always the one that kills the round and can return a diagnosis.
 func workerMCPEntry(npx bool) map[string]any {
+	entry := map[string]any{"type": "stdio", "command": "rig-move-llm", "args": []string{"worker"}}
 	if npx {
-		return map[string]any{"type": "stdio", "command": "npx", "args": []string{"-y", "rig-move-llm", "worker"}}
+		entry = map[string]any{"type": "stdio", "command": "npx", "args": []string{"-y", "rig-move-llm", "worker"}}
 	}
-	return map[string]any{"type": "stdio", "command": "rig-move-llm", "args": []string{"worker"}}
+	entry["timeout"] = int(worker.ClientCallTimeout() / time.Millisecond)
+	return entry
 }
 
 // renderMCP builds the CC-side .mcp.json. rig-move injects ONLY its own `worker`

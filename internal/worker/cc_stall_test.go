@@ -12,14 +12,16 @@ import (
 	"github.com/Cheevatech/rig-move-llm/internal/config"
 )
 
-// The invariant #18 was filed against: the engine's own wall must expire BEFORE
-// the calling client's MCP progress watchdog (Claude Code aborts a silent tool
-// call at 1800s). If this fails, a long round is killed by the client again and
-// rig never gets to return a diagnosis.
-func TestRunTimeoutStaysUnderClientWatchdog(t *testing.T) {
-	const clientWatchdog = 1800 * time.Second
-	if got := runTimeout(); got >= clientWatchdog {
-		t.Fatalf("runTimeout()=%s must stay below the %s client MCP watchdog", got, clientWatchdog)
+// The invariant #18 was filed against, corrected in #33: the engine's own wall
+// must expire BEFORE the client-side limit — but that limit is the per-call
+// timeout rig WRITES into .mcp.json, not the hardcoded 1800s this test used to
+// assert. 1800s was Claude Code's stdio IDLE window (30 min without a response or
+// a progress notification), and rig's per-server timeout now raises its floor.
+// If this fails, a long round is killed by the client again and rig never gets to
+// return a diagnosis.
+func TestRunTimeoutStaysUnderTheClientCallTimeout(t *testing.T) {
+	if got, client := runTimeout(), ClientCallTimeout(); got >= client {
+		t.Fatalf("runTimeout()=%s must stay below the %s per-call timeout rig declares to the client", got, client)
 	}
 }
 
@@ -29,10 +31,8 @@ func TestRunTimeoutStaysUnderClientWatchdog(t *testing.T) {
 // the command returns, and Claude Code allows one to run ~10 minutes, so a
 // tighter limit would kill healthy rounds in the middle of a slow test suite.
 func TestGuardLadder(t *testing.T) {
-	const (
-		clientWatchdog  = 1800 * time.Second
-		longestBashCall = 600 * time.Second
-	)
+	const longestBashCall = 600 * time.Second
+	clientWatchdog := ClientCallTimeout()
 	stall, wall := ccStallTimeout(), runTimeout()
 	if stall < longestBashCall {
 		t.Errorf("stall guard %s is below the %s bash ceiling — it would kill healthy rounds", stall, longestBashCall)

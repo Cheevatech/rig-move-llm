@@ -22,15 +22,36 @@ const mcpProtocolVersion = "2024-11-05"
 // runTimeout bounds a single implement call end-to-end (the agentic loop can take
 // minutes on a local model). Overridable via RIG_WORKER_RUN_TIMEOUT (seconds).
 //
-// INVARIANT: this must stay BELOW the calling client's MCP progress watchdog —
-// Claude Code aborts a tool call that has sent nothing for 1800s. The old 3600s
-// default violated it, so every long round was killed by the client with rig
-// never getting to say why (#18): MAIN saw a bare abort, re-delegated, and the
-// abandoned round kept running behind the next one. 1500s leaves the engine a
-// margin to kill its own subprocess and return a diagnosis first. Raising this
-// past the client watchdog re-opens exactly that failure.
+// INVARIANT (ordering, #33): stall guard < runTimeout < ClientCallTimeout. The
+// engine must be the one that kills its own round, so it can return a diagnosis
+// and the partial diff instead of leaving MAIN with a bare client-side abort.
+//
+// The 1500s that used to live here was calibrated against a timer that does not
+// exist. Claude Code runs TWO timers on an MCP tool call, and #18 conflated them:
+// the wall-clock limit is the per-server `timeout` in .mcp.json, else
+// MCP_TOOL_TIMEOUT, else about 28 hours — while the 1800s abort we actually
+// measured is the IDLE window, which for a stdio server is 30 minutes of no
+// response and no progress notification. rig's worker answers once, at the end,
+// so it is idle for the whole round by construction.
+//
+// So the honest bound is the per-server timeout rig now writes itself (see
+// ClientCallTimeout), which also raises the stdio idle floor above this guard.
+// 3000s is what a real cc round needs: measured 2026-07-30 (map13 volley 3,
+// task11) the worker was still streaming tool calls and had just written two real
+// files when the old guard cut it at 25 min — twice — so it never reached its own
+// test gate. Silence is the stall guard's job (600s); this bounds total work.
 func runTimeout() time.Duration {
-	return time.Duration(envInt("RIG_WORKER_RUN_TIMEOUT", 1500)) * time.Second
+	return time.Duration(envInt("RIG_WORKER_RUN_TIMEOUT", 3000)) * time.Second
+}
+
+// ClientCallTimeout is the wall-clock limit rig asks the CALLING client to apply
+// to one worker tool call — written into the generated .mcp.json as the worker
+// server's `timeout`. It sits above runTimeout so the engine always kills its own
+// round first, and it does double duty on Claude Code v2.1.203+: a per-server
+// timeout of at least 1s is also a floor on the idle timeout, so a round that is
+// working quietly is no longer aborted at the 30-minute stdio idle window.
+func ClientCallTimeout() time.Duration {
+	return runTimeout() + 5*time.Minute
 }
 
 // exploreTimeout bounds a single explore call. It is MUCH tighter than

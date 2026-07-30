@@ -261,7 +261,7 @@ instead of hanging or looping:
 | knob | default | what it does |
 |---|---|---|
 | `RIG_CC_STALL_TIMEOUT` | `600s` | kills a cc-engine round whose stream has gone completely silent (a live worker emits an event per tool call; the longest honest silence is a Bash call, which Claude Code caps around 10 minutes). `0` disables |
-| `RIG_WORKER_RUN_TIMEOUT` | `1500s` | the wall for one `implement` call. It must stay **below** the calling client's MCP watchdog (Claude Code aborts a silent tool call at 1800s) or the round dies without rig getting to explain why |
+| `RIG_WORKER_RUN_TIMEOUT` | `3000s` | the wall for one `implement` call. It must stay **below** the per-call `timeout` rig writes into the worker entry of `.mcp.json` (this value + 5 min), or the round dies without rig getting to explain why. That written timeout also raises Claude Code's stdio **idle** floor — without it a worker that answers only at the end of a long round is aborted after 30 min of "idleness" while it is still working (#33). Raising this wall means re-running `rig-move-llm init` so the `.mcp.json` timeout moves with it |
 | `RIG_MAX_DELEGATE_ROUNDS` | `3` | how many times the main agent may delegate within **one turn**. `0` disables |
 
 A killed round returns `stopped: "timeout"` with what the worker was last seen doing and any

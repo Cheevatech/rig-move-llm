@@ -78,7 +78,8 @@ func cmdDoctor(args []string) int {
 		fmt.Println("Usage: rig-move-llm doctor\n\n" +
 			"Proves the offload rig is live before you trust a measurement: config, worker\n" +
 			"endpoint (authenticated), cc engine, workspace trust, hooks (actually firing),\n" +
-			"the repo's gate toolchain as the WORKER sees it, and the effective guards.\n" +
+			"the repo's gate toolchain as the WORKER sees it, the effective guards, and\n" +
+			"whether the MAIN leg has credentials to open a session at all.\n" +
 			"Exits non-zero if any rung fails.")
 		return 0
 	}
@@ -94,6 +95,7 @@ func cmdDoctor(args []string) int {
 		checkHookLive(),
 		checkGateToolchain(cwd),
 		checkGuards(),
+		checkMainAuth(),
 	}
 
 	failed := 0
@@ -393,6 +395,58 @@ func envSource(key string) string {
 		return " (env " + key + "=" + v + ")"
 	}
 	return ""
+}
+
+// --- rung 8: the MAIN leg can start a session at all ----------------------
+
+// checkMainAuth is the hole the other seven rungs left open. Measured
+// 2026-07-30: an install answered all-7-PASS in a HOME where `claude` had never
+// been logged in — the worker leg rides a dummy key against the local endpoint
+// (auth hygiene, by design), so nothing below this rung touches the paid
+// identity, and doctor happily blessed an install that could not open a MAIN
+// session and therefore could not delegate anything.
+//
+// It is a credentials-PRESENT check, not a liveness one: the only way to prove
+// the subscription leg is live is to spend a real request on it, and a
+// diagnostic that silently bills the user is not one we ship. So the rung's
+// claim is narrow and its detail says so — an expired token still reads as
+// PASS here, and Claude Code will say so itself on launch.
+func checkMainAuth() rung {
+	const name = "MAIN auth"
+	if strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")) != "" {
+		return pass(name, "ANTHROPIC_API_KEY is set — the MAIN leg bills the API rather than a subscription")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return fail(name, "cannot resolve HOME, so the credentials Claude Code would use are unknown",
+			"set HOME to the account that runs the MAIN session")
+	}
+	launch := "HOME=" + home + " claude"
+	if _, err := os.Stat(filepath.Join(home, ".claude", ".credentials.json")); err == nil {
+		return pass(name, "subscription credentials present in "+home+"/.claude (freshness not checked — an expired token still reads as PASS)")
+	}
+	if hasOAuthAccount(filepath.Join(home, ".claude.json")) {
+		return pass(name, "a logged-in account is recorded in "+home+"/.claude.json (freshness not checked)")
+	}
+	return fail(name, "no MAIN credentials under HOME="+home+" — `claude` cannot open a session here, so there is no MAIN leg to delegate FROM (the worker leg's dummy key hides this from every other rung)",
+		"run `"+launch+"` once, log in, and accept the workspace trust prompt — it needs a terminal, so it cannot be scripted")
+}
+
+// hasOAuthAccount reports whether Claude Code's config records a logged-in
+// account. On macOS the token itself lives in the Keychain rather than in a
+// file, so this key is the only file-visible evidence of a login there.
+func hasOAuthAccount(path string) bool {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var cfg struct {
+		OAuthAccount json.RawMessage `json:"oauthAccount"`
+	}
+	if json.Unmarshal(b, &cfg) != nil {
+		return false
+	}
+	return len(cfg.OAuthAccount) > 0 && string(cfg.OAuthAccount) != "null"
 }
 
 // --- shared probe ---------------------------------------------------------

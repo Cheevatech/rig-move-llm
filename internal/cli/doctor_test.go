@@ -270,6 +270,86 @@ func TestGuardsRung(t *testing.T) {
 	})
 }
 
+// The all-7-PASS install that could not delegate: the worker leg runs on a dummy
+// key against the local endpoint, so no other rung ever touches the paid
+// identity, and a HOME with no login looked perfectly healthy.
+func TestMainAuthRung(t *testing.T) {
+	// setHome isolates the rung from the developer's real login.
+	setHome := func(t *testing.T) string {
+		t.Helper()
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("ANTHROPIC_API_KEY", "")
+		return home
+	}
+
+	t.Run("no credentials fails and names the one step a human must do", func(t *testing.T) {
+		home := setHome(t)
+
+		r := checkMainAuth()
+
+		if r.status != rungFail {
+			t.Fatalf("status = %s, want FAIL (%s)", r.status.label(), r.detail)
+		}
+		if !strings.Contains(r.detail, home) {
+			t.Errorf("detail must name the HOME it inspected:\n%s", r.detail)
+		}
+		if !strings.Contains(r.fix, "HOME="+home) || !strings.Contains(r.fix, "log in") {
+			t.Errorf("fix must be the runnable login step:\n%s", r.fix)
+		}
+	})
+
+	// The dogfood shape: .claude.json exists (it carries the workspace trust the
+	// trust rung reads) but records no account.
+	t.Run("a config with only project entries is not a login", func(t *testing.T) {
+		home := setHome(t)
+		mustWrite(t, filepath.Join(home, ".claude.json"), `{"projects":{"/repo":{}}}`)
+
+		if r := checkMainAuth(); r.status != rungFail {
+			t.Errorf("status = %s, want FAIL — workspace trust is not credentials", r.status.label())
+		}
+	})
+
+	t.Run("a recorded oauth account passes", func(t *testing.T) {
+		home := setHome(t)
+		mustWrite(t, filepath.Join(home, ".claude.json"), `{"projects":{},"oauthAccount":{"accountUuid":"u"}}`)
+
+		r := checkMainAuth()
+
+		if r.status != rungPass {
+			t.Fatalf("status = %s, want PASS (%s)", r.status.label(), r.detail)
+		}
+		// The rung must not overclaim: it never spent a request, so it cannot know
+		// the token still works.
+		if !strings.Contains(r.detail, "freshness not checked") {
+			t.Errorf("a presence check must say what it did NOT prove:\n%s", r.detail)
+		}
+	})
+
+	t.Run("a credentials file passes", func(t *testing.T) {
+		home := setHome(t)
+		if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		mustWrite(t, filepath.Join(home, ".claude", ".credentials.json"), `{"claudeAiOauth":{}}`)
+
+		if r := checkMainAuth(); r.status != rungPass {
+			t.Errorf("status = %s, want PASS (%s)", r.status.label(), r.detail)
+		}
+	})
+
+	t.Run("an API key is a valid MAIN identity and is reported as such", func(t *testing.T) {
+		setHome(t)
+		t.Setenv("ANTHROPIC_API_KEY", "sk-test")
+
+		r := checkMainAuth()
+
+		if r.status != rungPass || !strings.Contains(r.detail, "bills the API") {
+			t.Errorf("want PASS naming the billing mode, got %s / %s", r.status.label(), r.detail)
+		}
+	})
+}
+
 func mustWrite(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {

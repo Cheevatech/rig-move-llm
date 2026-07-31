@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Cheevatech/rig-move-llm/internal/config"
+	"github.com/Cheevatech/rig-move-llm/internal/gatestate"
 )
 
 // mcpProtocolVersion is the MCP revision we advertise. 2024-11-05 is broadly
@@ -288,6 +289,17 @@ func (s *Server) onToolsCall(params json.RawMessage) (map[string]any, *rpcError)
 	defer cancel()
 	logStderr("worker.implement repo=%s gate=%s", args.Repo, args.GateDir)
 	res := s.engine.Implement(ctx, args.Repo, args.Task, args.GateDir)
+
+	// A round the engine flagged unproductive must not cost MAIN a delegation
+	// slot (the budget exists to stop runaway retries, not to charge for rounds
+	// that produced nothing). The refund happens here — the process that computed
+	// the flag — against the same state dir the hook's budget reads; the cap that
+	// keeps the loop bounded lives in gatestate.RefundRound.
+	if res.Unproductive {
+		r, ok := gatestate.RefundRound(s.engine.stateDir())
+		logStderr("worker.implement unproductive justification=%q refund=%v effective=%d refunded=%d",
+			res.UnproductiveJustification, ok, r.Effective(), r.Refunded)
+	}
 
 	// The default return is the plain C0 payload: the B6 gate failed the tiered
 	// return on both axes, and the cc engine's winning numbers were all measured

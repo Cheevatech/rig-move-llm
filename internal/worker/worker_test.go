@@ -104,7 +104,10 @@ func TestImplement_FullCycle(t *testing.T) {
 	if res.Stopped != "done" {
 		t.Fatalf("stopped=%q err=%q", res.Stopped, res.Err)
 	}
-	if res.Summary != "Changed f() to return 2." {
+	// The engine gate now runs on every engine's diff-bearing rounds; this repo
+	// has no recognised shape, so the summary carries the NOT RUN note after the
+	// worker's own text.
+	if !strings.HasPrefix(res.Summary, "Changed f() to return 2.") {
 		t.Errorf("summary=%q", res.Summary)
 	}
 	got, _ := os.ReadFile(filepath.Join(repo, "app.py"))

@@ -196,9 +196,10 @@ func (s *State) PreTool(r io.Reader, w io.Writer) error {
 				// Anti-runaway budget (#18): count this delegation FIRST, and stop
 				// here if the turn's rounds are spent — a denied call must not
 				// freeze contracts or close the repair window.
-				if n, over := s.overRoundBudget(); over {
-					s.logf("ROUNDS deny round=%d max=%d", n, s.MaxRounds)
-					return denyMsg(w, roundBudgetReason(n, s.MaxRounds))
+				if r, over := s.overRoundBudget(); over {
+					s.logf("ROUNDS deny effective=%d count=%d refunded=%d max=%d",
+						r.Effective(), r.Count, r.Refunded, s.MaxRounds)
+					return denyMsg(w, roundBudgetReason(r, s.MaxRounds))
 				}
 				s.freezeGateDirs()
 				// Re-delegating supersedes any open Gate B window; a fresh one
@@ -226,31 +227,56 @@ func (s *State) PreTool(r io.Reader, w io.Writer) error {
 }
 
 // overRoundBudget records this delegation and reports whether the turn's budget
-// is spent. It is deliberately fail-open: with no state dir or no budget
-// configured, MAIN delegates as before.
-func (s *State) overRoundBudget() (int, bool) {
+// is spent. The spend it compares is EFFECTIVE: rounds paid minus rounds the
+// engine refunded as unproductive (Result.Unproductive → gatestate.RefundRound,
+// wired at the worker MCP server where the flag is computed). The rule stays
+// bounded because refunds cap at gatestate.MaxUnproductiveRefunds per turn, so a
+// caller that only ever produces unproductive rounds is still stopped — at most
+// MaxRounds + MaxUnproductiveRefunds calls run, however they end. It is
+// deliberately fail-open: with no state dir or no budget configured, MAIN
+// delegates as before.
+func (s *State) overRoundBudget() (gatestate.Rounds, bool) {
 	if s.StateDir == "" || s.MaxRounds <= 0 {
-		return 0, false
+		return gatestate.Rounds{}, false
 	}
+	// The count comes from BumpRound's return, not from reading the file back:
+	// on an unwritable state dir BumpRound degrades to 1 ("no budget"), and a
+	// read-back would instead resurrect a stale higher count and deny — a disk
+	// error making the budget STRICTER, the exact inversion of fail-open. The
+	// file is consulted only for Refunded, where absence harmlessly reads as 0.
 	n := gatestate.BumpRound(s.StateDir)
-	return n, n > s.MaxRounds
+	stored, _ := gatestate.ReadRounds(s.StateDir)
+	r := gatestate.Rounds{Count: n, Refunded: stored.Refunded, At: stored.At}
+	return r, r.Effective() > s.MaxRounds
 }
 
 // roundBudgetReason is the steer MAIN reads when the budget is spent. It names
-// the loop it is in, tells it to stop and report, and states plainly that the
-// human's next message is what reopens the budget — so nothing here needs a new
-// knob, and the human stays the one who decides another round is worth paying
-// for.
-func roundBudgetReason(n, max int) string {
+// the loop it is in, states the refund rule and that it is exhausted (the count
+// MAIN reads must be the TRUE remaining budget: zero), tells it to stop and
+// report, and states plainly that the human's next message is what reopens the
+// budget — so nothing here needs a new knob, and the human stays the one who
+// decides another round is worth paying for.
+func roundBudgetReason(r gatestate.Rounds, max int) string {
+	refunds := ""
+	if r.Refunded > 0 {
+		refunds = fmt.Sprintf(
+			"Unproductive rounds are refunded up to %d per turn and %d of yours were — those refunds are exhausted too. ",
+			gatestate.MaxUnproductiveRefunds, r.Refunded)
+	} else {
+		refunds = fmt.Sprintf(
+			"Unproductive rounds (empty diff, no work on disk) are refunded up to %d per turn; none of yours qualified. ",
+			gatestate.MaxUnproductiveRefunds)
+	}
 	return fmt.Sprintf(
-		"Delegation budget for this turn is spent: this is delegate call %d, the limit is %d. "+
+		"Delegation budget for this turn is spent: this is delegate call %d, the limit is %d, and ZERO delegate calls remain. "+
+			refunds+
 			"Re-delegating a task that already failed the same way is the runaway loop this budget exists "+
 			"to stop — every round costs a full round of your own thinking, and a worker that timed out or "+
 			"returned nothing will do it again. STOP now and report to the human: what each round returned, "+
 			"what you think is actually wrong, and the smallest next step you would take (a narrower slice "+
 			"of the task, a different file, or checking whether the worker endpoint is healthy). "+
 			"The budget resets on their next message — if they want another round, they will say so. "+
-			"(Operator override: RIG_MAX_DELEGATE_ROUNDS.)", n, max)
+			"(Operator override: RIG_MAX_DELEGATE_ROUNDS.)", r.Effective(), max)
 }
 
 // softEdit is the map6 soft-gate decision for a MAIN Edit/Write. It returns

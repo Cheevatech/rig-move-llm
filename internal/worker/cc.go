@@ -136,6 +136,9 @@ func (e *Engine) implementCC(ctx context.Context, absRepo, task, gateDir string)
 			res.Iterations += res2.Iterations
 			res.InputTokens += res2.InputTokens
 			res.OutputTokens += res2.OutputTokens
+			// The retry is part of the same round: a write it made counts toward
+			// the round's touched-files fact like any other.
+			res.FilesTouched = res.FilesTouched || res2.FilesTouched
 			if res2.LastTest != "" {
 				res.LastTest = res2.LastTest
 			}
@@ -969,6 +972,14 @@ func engineGateNote(o gateOutcome, workerVerdict string) string {
 		return prefix + "ENGINE GATE: " + o.Verdict +
 			" — measured by rig running " + cmdStr + " (RIG_* scrubbed). " +
 			"WORKER CLAIMED: " + workerVerdict + ". Agreed."
+	case workerVerdict == "unknown":
+		// No claim is not a disagreement. A round that never reported a test
+		// (common on small changes) must not be framed as a worker caught lying —
+		// that framing pushes the caller to distrust a good round, which is the
+		// false-reject failure this gate exists to prevent.
+		return prefix + "ENGINE GATE: " + o.Verdict +
+			" — measured by rig running " + cmdStr + " (RIG_* scrubbed). " +
+			"The worker reported no test result of its own; the engine's measurement above is the only verdict for this round."
 	default:
 		return prefix + "ENGINE GATE DISAGREES WITH THE WORKER. " +
 			"The engine measured: " + o.Verdict + ", running " + cmdStr +

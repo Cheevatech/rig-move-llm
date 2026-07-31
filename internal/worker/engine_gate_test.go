@@ -54,8 +54,10 @@ func TestEngineGateKilledRoundWithWork(t *testing.T) {
 	if res.LastTestCmd != "go build ./... && go test ./..." {
 		t.Errorf("last_test_cmd = %q, want go build+test", res.LastTestCmd)
 	}
-	if !strings.Contains(res.Err, "engine gate ran") {
-		t.Errorf("diagnosis missing engine gate result:\n%s", res.Err)
+	// The verdict is a value, not prose in the diagnosis: review must be able to
+	// read pass/fail without parsing Err.
+	if res.GateVerdict != "pass" && res.GateVerdict != "fail" {
+		t.Errorf("gate_verdict = %q, want pass or fail", res.GateVerdict)
 	}
 }
 
@@ -129,6 +131,9 @@ func TestEngineGateNormalRoundUnchanged(t *testing.T) {
 	}
 	if res.GateSource != "" {
 		t.Errorf("gate_source = %q, want empty for normal round", res.GateSource)
+	}
+	if res.GateVerdict != "" {
+		t.Errorf("gate_verdict = %q, want empty for normal round", res.GateVerdict)
 	}
 	if strings.Contains(res.LastTest, "ENGINE-RUN") {
 		t.Errorf("last_test should not contain engine marker on normal round: %q", res.LastTest)

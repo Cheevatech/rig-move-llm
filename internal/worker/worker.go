@@ -376,6 +376,9 @@ var inspectionCmds = map[string]bool{
 	"sort": true, "uniq": true, "diff": true, "env": true, "export": true,
 	"true": true, "false": true, "touch": true, "mkdir": true, "cp": true,
 	"mv": true, "rm": true, "chmod": true, "less": true, "more": true,
+	// `test`/`[` check state, they never run it (see the cc list's note: the
+	// omission clobbered a real gate capture with an echo).
+	"test": true, "[": true,
 }
 
 // isGateCommand reports whether a bash command verifies the change rather than

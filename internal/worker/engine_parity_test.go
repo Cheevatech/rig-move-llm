@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -252,5 +253,42 @@ func TestParity_GateCommandSeesThroughEnvWrapper(t *testing.T) {
 		if got := ccIsGateCommand(tc.cmd); got != tc.want {
 			t.Errorf("cc ccIsGateCommand(%q) = %v, want %v", tc.cmd, got, tc.want)
 		}
+	}
+}
+
+// `test`/`[` check state, they never run it. The omission bit for real: a
+// worker's final `test -f rig_proof_test.py && echo GONE` read as a gate run,
+// so its echo clobbered the real `go test` output already captured as LastTest
+// and a demonstrated round came back worker_verdict "unknown".
+func TestParity_TestBuiltinIsInspection(t *testing.T) {
+	for _, cmd := range []string{
+		`test -f rig_proof_test.py && echo "EXISTS" || echo "GONE"`,
+		`[ -f go.mod ] && echo yes`,
+	} {
+		if isGateCommand(cmd) {
+			t.Errorf("loop isGateCommand(%q) = true, want false", cmd)
+		}
+		if ccIsGateCommand(cmd) {
+			t.Errorf("cc ccIsGateCommand(%q) = true, want false", cmd)
+		}
+	}
+}
+
+// The two inspection lists are one fact spelled twice; any drift means the
+// engines classify the same worker command differently.
+func TestParity_InspectionListsIdentical(t *testing.T) {
+	if !reflect.DeepEqual(inspectionCmds, ccInspectionCmds) {
+		var onlyLoop, onlyCC []string
+		for k := range inspectionCmds {
+			if !ccInspectionCmds[k] {
+				onlyLoop = append(onlyLoop, k)
+			}
+		}
+		for k := range ccInspectionCmds {
+			if !inspectionCmds[k] {
+				onlyCC = append(onlyCC, k)
+			}
+		}
+		t.Fatalf("inspection lists drifted: only-loop=%v only-cc=%v", onlyLoop, onlyCC)
 	}
 }

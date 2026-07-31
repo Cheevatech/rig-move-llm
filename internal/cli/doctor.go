@@ -509,27 +509,27 @@ func checkHookLive() rung {
 
 // --- rung 6: the gate toolchain, as the WORKER sees it (#35) --------------
 
-// gateTool is a repo-shape marker paired with the command that verifies that
+// GateTool is a repo-shape marker paired with the command that verifies that
 // shape, plus the places the command commonly lives when it is installed but not
 // on PATH.
-type gateTool struct {
-	marker string
-	cmd    string
-	verify string
-	lookIn []string
+type GateTool struct {
+	Marker string
+	Cmd    string
+	Verify string
+	LookIn []string
 }
 
-var gateTools = []gateTool{
-	{marker: "go.mod", cmd: "go", verify: "go build ./... && go test ./...",
-		lookIn: []string{"/usr/local/go/bin", "~/go/bin", "/usr/lib/go/bin", "/opt/homebrew/bin"}},
-	{marker: "pyproject.toml", cmd: "pytest", verify: "pytest -q",
-		lookIn: []string{".venv/bin", "venv/bin", "~/.local/bin"}},
-	{marker: "setup.py", cmd: "pytest", verify: "pytest -q",
-		lookIn: []string{".venv/bin", "venv/bin", "~/.local/bin"}},
-	{marker: "package.json", cmd: "npm", verify: "npm test",
-		lookIn: []string{"/usr/local/bin", "/opt/homebrew/bin"}},
-	{marker: "Cargo.toml", cmd: "cargo", verify: "cargo test",
-		lookIn: []string{"~/.cargo/bin"}},
+var gateTools = []GateTool{
+	{Marker: "go.mod", Cmd: "go", Verify: "go build ./... && go test ./...",
+		LookIn: []string{"/usr/local/go/bin", "~/go/bin", "/usr/lib/go/bin", "/opt/homebrew/bin"}},
+	{Marker: "pyproject.toml", Cmd: "pytest", Verify: "pytest -q",
+		LookIn: []string{".venv/bin", "venv/bin", "~/.local/bin"}},
+	{Marker: "setup.py", Cmd: "pytest", Verify: "pytest -q",
+		LookIn: []string{".venv/bin", "venv/bin", "~/.local/bin"}},
+	{Marker: "package.json", Cmd: "npm", Verify: "npm test",
+		LookIn: []string{"/usr/local/bin", "/opt/homebrew/bin"}},
+	{Marker: "Cargo.toml", Cmd: "cargo", Verify: "cargo test",
+		LookIn: []string{"~/.cargo/bin"}},
 }
 
 // checkGateToolchain is #35. The worker inherits its PATH from the process that
@@ -545,39 +545,41 @@ var gateTools = []gateTool{
 // passed and taught us nothing.
 func checkGateToolchain(cwd string) rung {
 	const name = "gate toolchain"
-	tool, ok := detectGateTool(cwd)
+	tool, ok := DetectGateTool(cwd)
 	if !ok {
 		return skip(name, "no recognised project shape here — rig cannot infer the gate command")
 	}
-	if p, err := exec.LookPath(tool.cmd); err == nil {
-		return pass(name, fmt.Sprintf("%s found at %s (gate: %s)", tool.cmd, p, tool.verify))
+	if p, err := exec.LookPath(tool.Cmd); err == nil {
+		return pass(name, fmt.Sprintf("%s found at %s (gate: %s)", tool.Cmd, p, tool.Verify))
 	}
 	detail := fmt.Sprintf("%s (%s) declares a %s project, but `%s` is NOT on the PATH the worker inherits — it cannot run `%s`, so it cannot prove anything it changes",
-		tool.marker, cwd, tool.cmd, tool.cmd, tool.verify)
-	if found := findOffPath(tool, cwd); found != "" {
+		tool.Marker, cwd, tool.Cmd, tool.Cmd, tool.Verify)
+	if found := FindOffPath(tool, cwd); found != "" {
 		return fail(name, detail+"; it IS installed at "+found,
 			"add "+filepath.Dir(found)+" to PATH in the environment that launches Claude Code (a non-interactive shell does not read your profile)")
 	}
-	return fail(name, detail, "install "+tool.cmd+" and make sure it is on PATH for the process that launches Claude Code")
+	return fail(name, detail, "install "+tool.Cmd+" and make sure it is on PATH for the process that launches Claude Code")
 }
 
-func detectGateTool(dir string) (gateTool, bool) {
+// DetectGateTool scans dir for known repo-shape markers (go.mod, pyproject.toml,
+// etc.) and returns the matching tool entry, or (false) when none is found.
+func DetectGateTool(dir string) (GateTool, bool) {
 	for _, t := range gateTools {
-		if _, err := os.Stat(filepath.Join(dir, t.marker)); err == nil {
+		if _, err := os.Stat(filepath.Join(dir, t.Marker)); err == nil {
 			return t, true
 		}
 	}
-	return gateTool{}, false
+	return GateTool{}, false
 }
 
-// findOffPath looks for the command in the usual install locations, so the report
+// FindOffPath looks for the command in the usual install locations, so the report
 // can name the directory to add instead of telling the user to install something
 // they already have. Relative candidates (a project's .venv/bin) resolve against
 // the REPO, not the process working directory — the worker runs in the repo, and
 // doctor may not.
-func findOffPath(t gateTool, repo string) string {
+func FindOffPath(t GateTool, repo string) string {
 	home, _ := os.UserHomeDir()
-	for _, dir := range t.lookIn {
+	for _, dir := range t.LookIn {
 		switch {
 		case strings.HasPrefix(dir, "~/"):
 			if home == "" {
@@ -587,7 +589,7 @@ func findOffPath(t gateTool, repo string) string {
 		case !filepath.IsAbs(dir):
 			dir = filepath.Join(repo, dir)
 		}
-		p := filepath.Join(dir, t.cmd)
+		p := filepath.Join(dir, t.Cmd)
 		if st, err := os.Stat(p); err == nil && !st.IsDir() && st.Mode()&0o111 != 0 {
 			return p
 		}

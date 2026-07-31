@@ -23,6 +23,7 @@ package worker
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -31,6 +32,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Cheevatech/rig-move-llm/internal/gate"
 )
 
 // ccEnabled reports whether this implement call should run on the native-CC
@@ -150,6 +153,12 @@ func (e *Engine) implementCC(ctx context.Context, absRepo, task, gateDir string)
 	os.Remove(absRepo + string(os.PathSeparator) + ccProofFile)
 
 	res.Diff, res.FilesChanged = e.collectDiff(ctx, absRepo)
+
+	// Engine gate: after a killed round with partial work, prove the gate ourselves.
+	if res.Stopped == "timeout" && strings.TrimSpace(res.Diff) != "" {
+		e.runEngineGate(ctx, absRepo, &res)
+	}
+
 	return res
 }
 
@@ -777,4 +786,63 @@ func ccIsGateCommand(cmd string) bool {
 		}
 	}
 	return false
+}
+
+const engineGateTimeout = 60 * time.Second
+
+// runEngineGate runs the repo's gate after a killed round with partial work on
+// disk. It creates its own short-lived context — independent from the round's
+// cancelled one — because the gate is an independent check bounded by its own
+// timeout.
+func (e *Engine) runEngineGate(_ context.Context, repo string, res *Result) {
+	tool, ok := gate.DetectGateTool(repo)
+	if !ok {
+		res.Err += "\nengine gate not run: no recognised repo shape"
+		return
+	}
+
+	cmdName := tool.Cmd
+	if _, err := exec.LookPath(cmdName); err != nil {
+		if found := gate.FindOffPath(tool, repo); found != "" {
+			res.Err += fmt.Sprintf("\nengine gate not run: toolchain %s not on PATH (found at %s)", cmdName, found)
+		} else {
+			res.Err += fmt.Sprintf("\nengine gate not run: toolchain %s not on PATH", cmdName)
+		}
+		return
+	}
+
+	gateCtx, cancel := context.WithTimeout(context.Background(), engineGateTimeout)
+	defer cancel()
+	// Independent from the round's cancelled context. Short on purpose: the gate
+	// compiles and tests existing code — it never iterates.
+
+	cmd := exec.CommandContext(gateCtx, "bash", "-c", tool.Verify)
+	cmd.Dir = repo
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+
+	err := cmd.Run()
+	output := out.String()
+
+	if err != nil {
+		// Check if it was a timeout (the context was cancelled by its own deadline)
+		if gateCtx.Err() != nil {
+			res.Err += fmt.Sprintf("\nengine gate not run: gate exceeded %v engine timeout", engineGateTimeout)
+			return
+		}
+
+		// Gate ran but failed
+		res.LastTestCmd = tool.Verify
+		res.LastTest = "[ENGINE-RUN GATE — not demonstrated by the worker]\n" + output
+		res.GateSource = "engine"
+		res.Err += "\nengine gate ran: FAIL"
+		return
+	}
+
+	// Gate ran and passed
+	res.LastTestCmd = tool.Verify
+	res.LastTest = "[ENGINE-RUN GATE — not demonstrated by the worker]\n" + output
+	res.GateSource = "engine"
+	res.Err += "\nengine gate ran: PASS"
 }

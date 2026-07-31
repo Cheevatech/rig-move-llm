@@ -74,7 +74,10 @@ type Result struct {
 	// >0 means the run spanned multiple context windows without hallucinating from
 	// an over-long context.
 	Checkpoints int    `json:"checkpoints,omitempty"`
-	Err         string `json:"error,omitempty"`
+	// GateSource is empty for normal rounds. It is "engine" when the engine itself
+	// ran the gate on a killed round with partial work on disk.
+	GateSource string `json:"gate_source,omitempty"`
+	Err        string `json:"error,omitempty"`
 }
 
 // Failed reports whether this round should be flagged isError to the caller: a

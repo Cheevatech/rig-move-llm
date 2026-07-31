@@ -637,3 +637,89 @@ func TestStreamStopSequence(t *testing.T) {
 		t.Errorf("stream stop_sequence wrong: %+v", delta)
 	}
 }
+
+// A prompt too long for the worker is permanent, so the client must be told to
+// stop retrying no matter which status llama.cpp chose to report it with.
+func TestTranslateErrorStatusContextExceeded(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{
+			name:   "mid-decode 500 (llama.cpp KV overflow)",
+			status: 500,
+			body:   `{"error":{"code":500,"message":"Context size has been exceeded.","type":"server_error"}}`,
+		},
+		{
+			name:   "pre-check 400 with llama.cpp-only type",
+			status: 400,
+			body:   `{"error":{"code":400,"message":"request (131000 tokens) exceeds the available context size (128000 tokens), try increasing it","type":"exceed_context_size_error"},"n_prompt_tokens":131000,"n_ctx":128000}`,
+		},
+		{
+			name:   "prompt larger than max context",
+			status: 500,
+			body:   `{"error":{"message":"input (200000 tokens) is larger than the max context size (128000 tokens). skipping","type":"server_error"}}`,
+		},
+		{
+			name:   "generation hit the wall with shifting off",
+			status: 500,
+			body:   `{"error":{"message":"context shift is disabled","type":"server_error"}}`,
+		},
+		{
+			name:   "bare body, no error envelope",
+			status: 500,
+			body:   "Context size has been exceeded.",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			status, e := TranslateErrorStatus(c.status, []byte(c.body))
+			if status != 400 {
+				t.Errorf("status: got %d want 400", status)
+			}
+			if e.Error.Type != "invalid_request_error" {
+				t.Errorf("type: got %q want invalid_request_error", e.Error.Type)
+			}
+			if e.Error.Message == "" {
+				t.Error("message was dropped")
+			}
+		})
+	}
+}
+
+// Everything that is not a context overflow keeps its status, so a worker that is
+// merely restarting or overloaded is still retried.
+func TestTranslateErrorStatusKeepsRetryableErrors(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+		want   string
+	}{
+		{"generic upstream fault", 500, `{"error":{"message":"failed to decode","type":"server_error"}}`, "api_error"},
+		{"worker still loading", 503, `{"error":{"message":"loading model","type":"unavailable_error"}}`, "overloaded_error"},
+		{"rate limited", 429, `{"error":{"message":"slow down","type":"rate_limit_error"}}`, "rate_limit_error"},
+		{"empty slot, no body", 500, "", "api_error"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			status, e := TranslateErrorStatus(c.status, []byte(c.body))
+			if status != c.status {
+				t.Errorf("status: got %d want %d", status, c.status)
+			}
+			if e.Error.Type != c.want {
+				t.Errorf("type: got %q want %q", e.Error.Type, c.want)
+			}
+		})
+	}
+}
+
+// "context" appearing in an unrelated failure must not silence retries.
+func TestTranslateErrorStatusNoFalsePositive(t *testing.T) {
+	body := `{"error":{"message":"context deadline exceeded while dialing upstream","type":"server_error"}}`
+	status, e := TranslateErrorStatus(502, []byte(body))
+	if status != 502 || e.Error.Type != "api_error" {
+		t.Errorf("unrelated context error was misclassified: status=%d type=%q", status, e.Error.Type)
+	}
+}

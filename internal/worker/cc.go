@@ -796,6 +796,31 @@ func ccIsGateCommand(cmd string) bool {
 // is already on disk, it never iterates, so anything past this is a hang.
 const engineGateTimeout = 5 * time.Minute
 
+// gateEnv is the environment the ENGINE-run gate executes with: the rig
+// process's own environment minus every RIG_* variable.
+//
+// Same rule as ccChildEnv, for the same reason (#10): a build or test suite of
+// the user's repo must never see rig's configuration, or it fails for reasons
+// that have nothing to do with the change under test. It bites hardest exactly
+// here — rig's own repo has tests that read RIG_AGENT_ID, so an unscrubbed
+// engine gate would report `fail` on the very repo this feature was built in
+// (#42), and a verdict that is wrong is worse than the missing verdict #41 set
+// out to fix.
+//
+// Unlike ccChildEnv this adds nothing back: the gate is a build command, not an
+// agent, so it needs no identity of its own.
+func gateEnv() []string {
+	parent := os.Environ()
+	env := make([]string, 0, len(parent))
+	for _, kv := range parent {
+		if strings.HasPrefix(kv, "RIG_") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return env
+}
+
 // gateShell returns the interpreter for tool.Verify. The verify strings are
 // shell one-liners (`go build ./... && go test ./...`), so they need a shell —
 // and the one that exists is not the same everywhere.
@@ -839,6 +864,7 @@ func (e *Engine) runEngineGate(_ context.Context, repo string, res *Result) {
 	shell, shellFlag := gateShell()
 	cmd := exec.CommandContext(gateCtx, shell, shellFlag, tool.Verify)
 	cmd.Dir = repo
+	cmd.Env = gateEnv()
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out

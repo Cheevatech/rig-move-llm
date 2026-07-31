@@ -821,6 +821,12 @@ var ccInspectionCmds = map[string]bool{
 	"sort": true, "uniq": true, "diff": true, "env": true, "export": true,
 	"true": true, "false": true, "touch": true, "mkdir": true, "cp": true,
 	"mv": true, "rm": true, "chmod": true, "less": true, "more": true,
+	// `test`/`[` check state, they never run it — and the omission bit for
+	// real: a worker's final `test -f rig_proof_test.py && echo GONE` was
+	// classified as a gate run, so its echo CLOBBERED the real `go test`
+	// output already captured as LastTest and the worker's verdict came back
+	// "unknown" on a demonstrated round (v0.7.4 smoke, 2026-07-31).
+	"test": true, "[": true,
 }
 
 // ccIsGateCommand reports whether a bash command verifies the change rather

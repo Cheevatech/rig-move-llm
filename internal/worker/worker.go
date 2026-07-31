@@ -73,7 +73,15 @@ type Result struct {
 	// tripped and rig reset the conversation to a rig-assembled digest (option B).
 	// >0 means the run spanned multiple context windows without hallucinating from
 	// an over-long context.
-	Checkpoints int    `json:"checkpoints,omitempty"`
+	Checkpoints int `json:"checkpoints,omitempty"`
+	// GateSource is empty for normal rounds. It is "engine" when the engine itself
+	// ran the gate on a killed round with partial work on disk.
+	GateSource string `json:"gate_source,omitempty"`
+	// GateVerdict is "pass" or "fail" when a gate actually ran, and empty when
+	// none did. It exists so review reads a verdict as a value instead of
+	// grepping it out of the diagnosis prose — a killed round that returns work
+	// without a verdict is exactly the return MAIN cannot judge (#41).
+	GateVerdict string `json:"gate_verdict,omitempty"`
 	Err         string `json:"error,omitempty"`
 }
 

@@ -168,7 +168,24 @@ func (e *Engine) implementCC(ctx context.Context, absRepo, task, gateDir string)
 		}
 	}
 
+	// A round that ends on its own with nothing on disk is reported as its own
+	// outcome on this engine too. Implement() applies this to the 3-tool loop,
+	// but it returns here before reaching that call, and this is the engine the
+	// product actually runs.
+	determineUnproductive(&res, res.FilesTouched)
+
 	return res
+}
+
+// ccWritesFiles reports whether a native Claude Code tool name mutates the
+// filesystem. Bash is deliberately absent: it is how the worker reads and runs
+// the gate, so counting it would make every round look like it touched files.
+func ccWritesFiles(name string) bool {
+	switch name {
+	case "Write", "Edit", "MultiEdit", "NotebookEdit":
+		return true
+	}
+	return false
 }
 
 // applyEngineGate runs the repo's gate on a normal (non-killed) round with a
@@ -596,6 +613,13 @@ func (e *Engine) parseCCStream(r interface{ Read([]byte) (int, error) }, mirror 
 			for _, b := range ccContentBlocks(ev.Message.Content) {
 				if b.Type == "tool_use" && act != nil {
 					act.touch(ccToolDesc(b))
+				}
+				// The cc engine's worker is native Claude Code, so its filesystem
+				// writes arrive as these tool names rather than the 3-tool loop's
+				// write_file. Bash is excluded on the same reasoning as there: it
+				// is the tool the worker reads and tests with.
+				if b.Type == "tool_use" && ccWritesFiles(b.Name) {
+					res.FilesTouched = true
 				}
 				if b.Type == "tool_use" && b.Name == "Bash" {
 					var in struct {

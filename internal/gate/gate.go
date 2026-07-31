@@ -19,6 +19,7 @@ type GateTool struct {
 	LookIn []string
 }
 
+// Ordered: DetectGateTool scans top-down and the first marker found wins.
 var gateTools = []GateTool{
 	{Marker: "go.mod", Cmd: "go", Verify: "go build ./... && go test ./...",
 		LookIn: []string{"/usr/local/go/bin", "~/go/bin", "/usr/lib/go/bin", "/opt/homebrew/bin"}},
@@ -33,7 +34,7 @@ var gateTools = []GateTool{
 }
 
 // DetectGateTool scans dir for known repo-shape markers (go.mod, pyproject.toml,
-// etc.) and returns the matching tool entry, or (false) when none is found.
+// etc.) and returns the matching tool entry, or (GateTool{}, false) when none is found.
 func DetectGateTool(dir string) (GateTool, bool) {
 	for _, t := range gateTools {
 		if _, err := os.Stat(filepath.Join(dir, t.Marker)); err == nil {
@@ -47,7 +48,8 @@ func DetectGateTool(dir string) (GateTool, bool) {
 // can name the directory to add instead of telling the user to install something
 // they already have. Relative candidates (a project's .venv/bin) resolve against
 // the REPO, not the process working directory — the worker runs in the repo, and
-// doctor may not.
+// doctor may not. A candidate that exists but is not executable is skipped, never
+// reported.
 func FindOffPath(t GateTool, repo string) string {
 	home, _ := os.UserHomeDir()
 	for _, dir := range t.LookIn {

@@ -203,21 +203,23 @@ type TieredResult struct {
 	Changes         []Change `json:"changes,omitempty"` // tier=manifest only
 	// Granularity says what one entry in Changes stands for: "symbol" normally,
 	// "file" when per-symbol entries cost more than the diff they replace.
-	Granularity      string      `json:"granularity,omitempty"`
-	Verify           *VerifyTier `json:"verify,omitempty"`
-	DrillWith        string      `json:"drill_with,omitempty"`
-	Iterations       int         `json:"iterations"`
-	InputTokens      int         `json:"input_tokens"`
-	OutputTokens     int         `json:"output_tokens"`
-	Stopped          string      `json:"stopped"`
-	HitIterationCap  bool        `json:"hit_iteration_cap,omitempty"`
-	Checkpoints      int         `json:"checkpoints,omitempty"`
-	Err              string      `json:"error,omitempty"`
-	GateSource       string      `json:"gate_source,omitempty"`
-	GateVerdict      string      `json:"gate_verdict,omitempty"`
-	EngineGateCmd    string      `json:"engine_gate_cmd,omitempty"`
-	EngineGateOutput string      `json:"engine_gate_output,omitempty"`
-	WorkerVerdict    string      `json:"worker_verdict,omitempty"`
+	Granularity               string      `json:"granularity,omitempty"`
+	Verify                    *VerifyTier `json:"verify,omitempty"`
+	DrillWith                 string      `json:"drill_with,omitempty"`
+	Iterations                int         `json:"iterations"`
+	InputTokens               int         `json:"input_tokens"`
+	OutputTokens              int         `json:"output_tokens"`
+	Stopped                   string      `json:"stopped"`
+	HitIterationCap           bool        `json:"hit_iteration_cap,omitempty"`
+	Checkpoints               int         `json:"checkpoints,omitempty"`
+	Unproductive              bool        `json:"unproductive,omitempty"`
+	UnproductiveJustification string      `json:"unproductive_justification,omitempty"`
+	Err                       string      `json:"error,omitempty"`
+	GateSource                string      `json:"gate_source,omitempty"`
+	GateVerdict               string      `json:"gate_verdict,omitempty"`
+	EngineGateCmd             string      `json:"engine_gate_cmd,omitempty"`
+	EngineGateOutput          string      `json:"engine_gate_output,omitempty"`
+	WorkerVerdict             string      `json:"worker_verdict,omitempty"`
 }
 
 // drillGuidance tells MAIN what the manifest is and what to do with it: review
@@ -242,22 +244,24 @@ const drillGuidance = "The diff exceeded the return budget, so it was left in th
 // see the diff.
 func TierResult(res Result, repo string, thresholdTokens int) TieredResult {
 	out := TieredResult{
-		Summary:          intentLine(res.Summary),
-		FilesChanged:     res.FilesChanged,
-		DiffTokens:       estimateTokens(res.Diff),
-		ThresholdTokens:  thresholdTokens,
-		Iterations:       res.Iterations,
-		InputTokens:      res.InputTokens,
-		OutputTokens:     res.OutputTokens,
-		Stopped:          res.Stopped,
-		HitIterationCap:  res.HitIterationCap,
-		Checkpoints:      res.Checkpoints,
-		Err:              res.Err,
-		GateSource:       res.GateSource,
-		GateVerdict:      res.GateVerdict,
-		EngineGateCmd:    res.EngineGateCmd,
-		EngineGateOutput: res.EngineGateOutput,
-		WorkerVerdict:    res.WorkerVerdict,
+		Summary:                   intentLine(res.Summary),
+		FilesChanged:              res.FilesChanged,
+		DiffTokens:                estimateTokens(res.Diff),
+		ThresholdTokens:           thresholdTokens,
+		Iterations:                res.Iterations,
+		InputTokens:               res.InputTokens,
+		OutputTokens:              res.OutputTokens,
+		Stopped:                   res.Stopped,
+		HitIterationCap:           res.HitIterationCap,
+		Checkpoints:               res.Checkpoints,
+		Unproductive:              res.Unproductive,
+		UnproductiveJustification: res.UnproductiveJustification,
+		Err:                       res.Err,
+		GateSource:                res.GateSource,
+		GateVerdict:               res.GateVerdict,
+		EngineGateCmd:             res.EngineGateCmd,
+		EngineGateOutput:          res.EngineGateOutput,
+		WorkerVerdict:             res.WorkerVerdict,
 	}
 	out.Repo = repo
 	out.Verify = tierVerify(res.LastTest, res.LastTestCmd, repo)

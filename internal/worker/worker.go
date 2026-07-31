@@ -82,7 +82,16 @@ type Result struct {
 	// grepping it out of the diagnosis prose — a killed round that returns work
 	// without a verdict is exactly the return MAIN cannot judge (#41).
 	GateVerdict string `json:"gate_verdict,omitempty"`
-	Err         string `json:"error,omitempty"`
+	// EngineGateCmd is the command the engine itself ran to verify the gate.
+	// EngineGateOutput is the stdout+stderr that command produced.
+	EngineGateCmd    string `json:"engine_gate_cmd,omitempty"`
+	EngineGateOutput string `json:"engine_gate_output,omitempty"`
+	// WorkerVerdict is "pass"|"fail"|"unknown" — what the worker's own last_test
+	// field claims. It is a claim, never a measurement; it stays in its own field
+	// so a caller can never mistake it for GateVerdict, which is always the
+	// engine's own measurement.
+	WorkerVerdict string `json:"worker_verdict,omitempty"`
+	Err           string `json:"error,omitempty"`
 }
 
 // Failed reports whether this round should be flagged isError to the caller: a

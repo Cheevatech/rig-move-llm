@@ -10,6 +10,8 @@ import "strings"
 //     The right answer was "nothing to change here" and the worker found it quickly.
 //   - Unproductive: burned many iterations and tokens, ended with no diff, no files
 //     changed — clearly not a quick deliberate conclusion.
+//
+// Tuned on map14 volley-2 data; revisit only against measured rounds.
 const (
 	// unproductiveIterThreshold: a "quick" conclusion uses fewer iterations.
 	// 5 sits past a worker that reads, checks, and concludes ("nothing here").

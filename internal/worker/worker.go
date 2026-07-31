@@ -278,6 +278,17 @@ func (e *Engine) Implement(ctx context.Context, repo, task, gateDir string) Resu
 			"The diff below is best-effort and may be incomplete — review it with extra scrutiny."
 	}
 	res.Diff, res.FilesChanged = e.collectDiff(ctx, absRepo)
+
+	// Engine gate — same contract as the cc engine (parity is load-bearing: #48
+	// shipped with its check wired on one engine only, and nothing caught it).
+	// Any round that returns a non-empty diff gets the engine's own measurement
+	// beside the worker's claim; an empty diff runs nothing. The loop has no
+	// "timeout" Stopped value (its kill path is ctx cancellation → "error"), so
+	// there is no killed-round adapter branch here.
+	if strings.TrimSpace(res.Diff) != "" {
+		applyEngineGate(&res, absRepo)
+	}
+
 	determineUnproductive(&res, res.FilesTouched)
 	return res
 }

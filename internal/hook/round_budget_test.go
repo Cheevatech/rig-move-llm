@@ -197,3 +197,83 @@ func TestRoundBudget_OnlyMetersImplement(t *testing.T) {
 		t.Fatal("implement must still have its full budget after explore calls")
 	}
 }
+
+// An unproductive round is refunded: after the engine gives the slot back, the
+// full productive budget is still available. (The refund itself is wired at the
+// worker MCP server; here the budget math is what's under test.)
+func TestRoundBudget_UnproductiveRoundDoesNotConsumeASlot(t *testing.T) {
+	s := budgetState(t, 3)
+
+	// Round 1 runs and comes back unproductive → refunded.
+	if denied, _ := preDecision(t, s, implementCall); denied {
+		t.Fatal("round 1 must be allowed")
+	}
+	if _, ok := gatestate.RefundRound(s.StateDir); !ok {
+		t.Fatal("refund must be granted for the first unproductive round")
+	}
+
+	// A full budget of 3 productive rounds must still fit.
+	for i := 1; i <= 3; i++ {
+		if denied, out := preDecision(t, s, implementCall); denied {
+			t.Fatalf("productive round %d after a refund must be allowed; out=%q", i, out)
+		}
+	}
+	if denied, _ := preDecision(t, s, implementCall); !denied {
+		t.Fatal("the round after the refunded budget must still be denied")
+	}
+}
+
+// A caller that only ever produces unproductive rounds is STILL stopped: the
+// refund cap bounds the loop at MaxRounds + MaxUnproductiveRefunds calls.
+func TestRoundBudget_OnlyUnproductiveRoundsIsStillStopped(t *testing.T) {
+	s := budgetState(t, 3)
+
+	allowed := 0
+	for i := 1; i <= 10; i++ {
+		denied, _ := preDecision(t, s, implementCall)
+		if denied {
+			break
+		}
+		allowed++
+		// Every round comes back unproductive; past the cap the refund is refused.
+		gatestate.RefundRound(s.StateDir)
+	}
+
+	want := s.MaxRounds + gatestate.MaxUnproductiveRefunds
+	if allowed != want {
+		t.Fatalf("allowed %d all-unproductive rounds, want exactly MaxRounds+cap = %d", allowed, want)
+	}
+}
+
+// The denial message must state the TRUE budget under the refund rule: the
+// effective call number, that zero calls remain, and the refund accounting.
+func TestRoundBudget_DenialMessageStatesTrueRemaining(t *testing.T) {
+	s := budgetState(t, 3)
+
+	// One refunded round, then a full productive budget, then the denied call.
+	if denied, _ := preDecision(t, s, implementCall); denied {
+		t.Fatal("round 1 must be allowed")
+	}
+	gatestate.RefundRound(s.StateDir)
+	for i := 1; i <= 3; i++ {
+		if denied, _ := preDecision(t, s, implementCall); denied {
+			t.Fatalf("productive round %d must be allowed", i)
+		}
+	}
+	denied, out := preDecision(t, s, implementCall)
+	if !denied {
+		t.Fatal("the call past the refunded budget must be denied")
+	}
+	for _, want := range []string{
+		"delegate call 4", // effective: 5 paid - 1 refunded
+		"the limit is 3",
+		"ZERO delegate calls remain",
+		"refunded up to 2 per turn",
+		"1 of yours were",
+		"RIG_MAX_DELEGATE_ROUNDS",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("deny reason missing %q; out=%q", want, out)
+		}
+	}
+}

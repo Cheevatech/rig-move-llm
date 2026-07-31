@@ -223,10 +223,14 @@ func TestEngineGateNoteShapes(t *testing.T) {
 			mustContain:   []string{"ENGINE GATE DISAGREES WITH THE WORKER", "fail", "pass", "not evidence"},
 		},
 		{
-			name:          "unknown worker verdict",
-			o:             gateOutcome{Ran: true, Verdict: "pass", Cmd: "go test ./..."},
-			workerVerdict: "unknown",
-			mustContain:   []string{"ENGINE GATE DISAGREES WITH THE WORKER", "pass", "unknown"},
+			// No claim is not a disagreement: a round that ran no test of its own
+			// must not read as a worker caught lying, or the caller is pushed to
+			// distrust a good round (the false-reject failure this gate prevents).
+			name:           "unknown worker verdict",
+			o:              gateOutcome{Ran: true, Verdict: "pass", Cmd: "go test ./..."},
+			workerVerdict:  "unknown",
+			mustContain:    []string{"ENGINE GATE: pass", "no test result of its own", "only verdict"},
+			mustNotContain: []string{"DISAGREES", "not evidence"},
 		},
 		{
 			name:          "not run",

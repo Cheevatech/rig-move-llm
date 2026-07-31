@@ -72,13 +72,40 @@ type Repair struct {
 	OpenedAt  time.Time `json:"opened_at"`
 }
 
+// MaxUnproductiveRefunds caps how many unproductive rounds one turn can be
+// refunded. The refund exists because a round that produced nothing must not
+// cost MAIN a slot it could have spent producing something (measured 2026-07-31:
+// a round burned 16 iterations / 416k input tokens, returned an empty diff, and
+// still consumed one of the three slots). The cap is what makes the rule
+// terminate: without it, "unproductive rounds are free" reinstates exactly the
+// unbounded retry loop the budget exists to stop. With the cap, a turn can never
+// exceed MaxRounds + MaxUnproductiveRefunds delegate calls, however the rounds
+// end. 2 covers the measured failure (one empty round) plus one retry of a
+// narrowed spec.
+const MaxUnproductiveRefunds = 2
+
 // Rounds counts how many times MAIN has delegated to the worker in the CURRENT
 // turn. It is the anti-runaway budget: a delegation that fails in a way that
 // repeats (a timeout, a worker that returns nothing) invites MAIN to delegate
 // again forever, which is the map9 money failure with no natural stop (#18).
+//
+// Refunded counts rounds given back because the engine flagged them
+// unproductive (Result.Unproductive): the effective spend is Count - Refunded.
+// It lives in the same file as Count so ClearTurn and the TTL reset both
+// together — a parallel counter could drift and reopen the runaway loop.
 type Rounds struct {
-	Count int       `json:"count"`
-	At    time.Time `json:"at"`
+	Count    int       `json:"count"`
+	Refunded int       `json:"refunded,omitempty"`
+	At       time.Time `json:"at"`
+}
+
+// Effective is the spend the budget compares against MaxRounds: rounds paid
+// minus rounds refunded, never negative.
+func (r Rounds) Effective() int {
+	if n := r.Count - r.Refunded; n > 0 {
+		return n
+	}
+	return 0
 }
 
 // BumpRound records one delegation and returns the new count for this turn. A
@@ -93,6 +120,25 @@ func BumpRound(dir string) int {
 		return 1
 	}
 	return r.Count
+}
+
+// RefundRound gives back one delegation slot for a round the engine flagged
+// unproductive, up to MaxUnproductiveRefunds per turn. It returns the new state
+// and whether a refund was granted. No fresh counter, nothing spent, or the cap
+// reached means no refund. Like the rest of this file it is fail-open: a write
+// error grants nothing but harms nothing — the budget merely stays as strict as
+// it already was, and a disk error must never manufacture extra rounds.
+func RefundRound(dir string) (Rounds, bool) {
+	r, ok := ReadRounds(dir)
+	if !ok || r.Count == 0 || r.Refunded >= MaxUnproductiveRefunds {
+		return r, false
+	}
+	r.Refunded++
+	if write(filepath.Join(dir, roundsFile), r) != nil {
+		r.Refunded--
+		return r, false
+	}
+	return r, true
 }
 
 // ReadRounds returns this turn's delegation count and whether it exists and is

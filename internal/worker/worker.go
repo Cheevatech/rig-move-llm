@@ -91,7 +91,16 @@ type Result struct {
 	// so a caller can never mistake it for GateVerdict, which is always the
 	// engine's own measurement.
 	WorkerVerdict string `json:"worker_verdict,omitempty"`
-	Err           string `json:"error,omitempty"`
+	// FilesTouched is true when the worker wrote to the filesystem during the round,
+	// regardless of whether those changes survive in the final diff. A round that
+	// touches files but produces no surviving diff is unproductive regardless of spend.
+	FilesTouched bool `json:"files_touched,omitempty"`
+	// Unproductive is true when the round ended on its own but left no work on disk
+	// and spent enough iterations/tokens that it was clearly not a quick deliberate
+	// "nothing to change" conclusion. See unproductive_* constants for thresholds.
+	Unproductive              bool   `json:"unproductive,omitempty"`
+	UnproductiveJustification string `json:"unproductive_justification,omitempty"`
+	Err                       string `json:"error,omitempty"`
 }
 
 // Failed reports whether this round should be flagged isError to the caller: a
@@ -232,6 +241,10 @@ func (e *Engine) Implement(ctx context.Context, repo, task, gateDir string) Resu
 					res.LastTest = out
 					res.LastTestCmd = cmd
 				}
+			case "write_file":
+				// NOTE: run_bash can also mutate files but is excluded from FilesTouched
+				// because it's used for reads/tests.
+				res.FilesTouched = true
 			case "read_file":
 				if p := readPathArg(tc); p != "" {
 					read[p] = true
@@ -265,6 +278,7 @@ func (e *Engine) Implement(ctx context.Context, repo, task, gateDir string) Resu
 			"The diff below is best-effort and may be incomplete — review it with extra scrutiny."
 	}
 	res.Diff, res.FilesChanged = e.collectDiff(ctx, absRepo)
+	determineUnproductive(&res, res.FilesTouched)
 	return res
 }
 

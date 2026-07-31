@@ -73,11 +73,11 @@ func (s *Server) handleWorkerRoute(w http.ResponseWriter, r *http.Request, cfg c
 	// Worker error -> translate to an Anthropic error envelope so CC surfaces it.
 	if resp.StatusCode/100 != 2 {
 		errBody, _ := io.ReadAll(resp.Body)
-		aerr := translate.TranslateError(resp.StatusCode, errBody)
+		status, aerr := translate.TranslateErrorStatus(resp.StatusCode, errBody)
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(resp.StatusCode)
+		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(aerr)
-		s.recordWorker(project, inboundModel, 0, 0, start, resp.StatusCode, body)
+		s.recordWorker(project, inboundModel, 0, 0, start, status, body)
 		return
 	}
 

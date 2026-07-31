@@ -2,6 +2,7 @@ package translate
 
 import (
 	"encoding/json"
+	"net/http"
 	"strings"
 )
 
@@ -219,6 +220,61 @@ func TranslateError(status int, body []byte) AnthropicErrorResponse {
 			Message: msg,
 		},
 	}
+}
+
+// TranslateErrorStatus is TranslateError plus the HTTP status the client should
+// see, which is not always the status the worker returned.
+//
+// A prompt that does not fit the worker's context is a permanent property of that
+// prompt: resending it unchanged can only fail again. llama.cpp nonetheless reports
+// the mid-decode form of it as HTTP 500, which Claude Code reads as a transient
+// server fault and retries up to ten times — each retry re-prefilling the whole
+// conversation before failing identically. A single map14/E run burned 1886s (27%
+// of its wall) on eleven such retries.
+//
+// So a context-exceeded body is re-stated as 400 invalid_request_error regardless
+// of the status the worker chose: CC stops retrying and compacts instead. Every
+// other 5xx keeps its status and stays retryable — a worker that is genuinely
+// restarting or overloaded should still be retried.
+func TranslateErrorStatus(status int, body []byte) (int, AnthropicErrorResponse) {
+	aerr := TranslateError(status, body)
+	if isContextExceeded(body) {
+		aerr.Error.Type = "invalid_request_error"
+		return http.StatusBadRequest, aerr
+	}
+	return status, aerr
+}
+
+// contextExceededMarkers are the surfaces llama.cpp uses for "this prompt does not
+// fit", verified against build 9739 (tools/server):
+//
+//   - exceed_context_size_error — the pre-check error type (server-common.cpp),
+//     already a 400 but carrying a type Anthropic does not know.
+//   - "context size has been exceeded" — the mid-decode failure (server-context.cpp),
+//     reported as a 500. This is the form the KV cache overflow actually takes.
+//   - "exceeds the available context size" — the pre-check message text, matched
+//     directly for servers that drop the type field.
+//   - "context shift is disabled" — generation hit the end of the context with
+//     shifting off: also permanent for this conversation.
+//
+// Matching is on the lowercased raw body, so it holds whether the worker wraps the
+// text in an OpenAI error envelope or returns it bare.
+var contextExceededMarkers = []string{
+	"exceed_context_size_error",
+	"context size has been exceeded",
+	"exceeds the available context size",
+	"is larger than the max context size",
+	"context shift is disabled",
+}
+
+func isContextExceeded(body []byte) bool {
+	s := strings.ToLower(string(body))
+	for _, m := range contextExceededMarkers {
+		if strings.Contains(s, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // mapOpenAIErrorType maps a known OpenAI error.type to an Anthropic error type.

@@ -832,14 +832,13 @@ func ccIsGateCommand(cmd string) bool {
 		for len(fields) > 0 && strings.Contains(fields[0], "=") && !strings.ContainsAny(fields[0], "/") {
 			fields = fields[1:]
 		}
+		// Same env unwrapping as the loop's classifier (stripEnvWrapper): rig's
+		// own task prompts tell the worker to run its gate under `env -u`.
+		fields = stripEnvWrapper(fields)
 		if len(fields) == 0 {
 			continue
 		}
-		head := fields[0]
-		if i := strings.LastIndex(head, "/"); i >= 0 {
-			head = head[i+1:]
-		}
-		if !ccInspectionCmds[head] {
+		if !ccInspectionCmds[baseName(fields[0])] {
 			return true
 		}
 	}

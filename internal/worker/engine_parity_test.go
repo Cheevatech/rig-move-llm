@@ -223,3 +223,34 @@ func TestMCPImplementRefundsUnproductiveRound(t *testing.T) {
 		t.Fatalf("a productive round must not refund: rounds=%+v", r)
 	}
 }
+
+// Both classifiers must see through an `env [flags] [VAR=val] cmd` wrapper —
+// rig's own task prompts mandate `env -u RIG_AGENT_ID go test ./...`, and with
+// `env` in the inspection lists that exact invocation classified as inspection,
+// so the worker's real gate run never became LastTest and its verdict read
+// "unknown" (measured on the v0.7.4 smoke).
+func TestParity_GateCommandSeesThroughEnvWrapper(t *testing.T) {
+	cases := []struct {
+		cmd  string
+		want bool
+	}{
+		{"env -u RIG_AGENT_ID go test ./...", true},
+		{"env -u RIG_AGENT_ID go build ./... && env -u RIG_AGENT_ID go test ./...", true},
+		{"/usr/bin/env pytest -q", true},
+		{"env PATH=/opt/homebrew/bin pytest -q", true},
+		{"CI=1 env -i go test ./...", true},
+		{"env env go test ./...", true},
+		{"env", false},                 // bare env prints the environment
+		{"env -u RIG_AGENT_ID", false}, // wrapper with nothing to launch
+		{"env -i git diff", false},     // the launched command is inspection
+		{"git diff", false},
+	}
+	for _, tc := range cases {
+		if got := isGateCommand(tc.cmd); got != tc.want {
+			t.Errorf("loop isGateCommand(%q) = %v, want %v", tc.cmd, got, tc.want)
+		}
+		if got := ccIsGateCommand(tc.cmd); got != tc.want {
+			t.Errorf("cc ccIsGateCommand(%q) = %v, want %v", tc.cmd, got, tc.want)
+		}
+	}
+}

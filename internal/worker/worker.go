@@ -392,6 +392,7 @@ func isGateCommand(cmd string) bool {
 		for len(fields) > 0 && strings.Contains(fields[0], "=") && !strings.ContainsAny(fields[0], "/") {
 			fields = fields[1:]
 		}
+		fields = stripEnvWrapper(fields)
 		if len(fields) == 0 {
 			continue
 		}
@@ -408,6 +409,43 @@ func isGateCommand(cmd string) bool {
 
 // splitShellSegments cuts a command on the operators that chain separate
 // programs, so each segment can be judged on its own head word.
+// stripEnvWrapper unwraps a leading `env [flags] [VAR=val ...]` so the command
+// env launches is what gets classified. Without this, `env -u RIG_AGENT_ID
+// go test ./...` — the exact invocation rig's own task prompts mandate — read
+// as an inspection command (`env` is in the list), so a real gate run was never
+// captured as LastTest and the worker's verdict came back "unknown" (measured
+// on the v0.7.4 smoke, 2026-07-31). Bare `env` (prints the environment) still
+// classifies as inspection: unwrapping it leaves nothing, and the caller skips
+// empty segments. Shared by both engines' classifiers — parity is load-bearing.
+func stripEnvWrapper(fields []string) []string {
+	for len(fields) > 0 && baseName(fields[0]) == "env" {
+		rest := fields[1:]
+		for len(rest) > 0 && isEnvArg(rest[0]) {
+			if (rest[0] == "-u" || rest[0] == "--unset") && len(rest) > 1 {
+				rest = rest[1:] // the flag's NAME argument travels with it
+			}
+			rest = rest[1:]
+		}
+		fields = rest // the command env launches; loop again in case it is env too
+	}
+	return fields
+}
+
+// isEnvArg reports whether one env argument is part of the wrapper rather than
+// the launched command: a flag, or a VAR=val assignment. env's grammar is
+// flags, then assignments, then the command — and values may carry slashes
+// (PATH=/usr/bin), so unlike the caller's VAR= skip this does not exclude them.
+func isEnvArg(f string) bool {
+	return strings.HasPrefix(f, "-") || strings.Contains(f, "=")
+}
+
+func baseName(s string) string {
+	if i := strings.LastIndex(s, "/"); i >= 0 {
+		return s[i+1:]
+	}
+	return s
+}
+
 func splitShellSegments(cmd string) []string {
 	repl := strings.NewReplacer("&&", "\x00", "||", "\x00", ";", "\x00", "|", "\x00", "\n", "\x00")
 	var out []string

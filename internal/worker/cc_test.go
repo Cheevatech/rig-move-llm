@@ -93,10 +93,17 @@ func TestCCImplementHappyPath(t *testing.T) {
 	e := NewEngine(config.Config{})
 	res := e.Implement(context.Background(), repo, "fix the bug", "")
 
-	if res.Stopped != "done" || res.Err != "" {
-		t.Fatalf("stopped=%q err=%q", res.Stopped, res.Err)
+	if res.Stopped != "done" {
+		t.Fatalf("stopped=%q, want done", res.Stopped)
 	}
-	if res.Summary != "Fixed the condition and verified." {
+	// The test repo has no go.mod, so the engine gate cannot run and appends
+	// the "engine gate not run" note to Err — that is expected, not a bug.
+	if res.Err != "" && !strings.Contains(res.Err, "engine gate not run") {
+		t.Fatalf("unexpected err=%q", res.Err)
+	}
+	// The test repo has no go.mod, so the engine gate cannot run and appends
+	// a note to the summary — the worker's own text is still the prefix.
+	if !strings.HasPrefix(res.Summary, "Fixed the condition and verified.") {
 		t.Errorf("summary=%q", res.Summary)
 	}
 	if res.Iterations != 4 || res.InputTokens != 111 || res.OutputTokens != 22 {

@@ -155,12 +155,42 @@ func (e *Engine) implementCC(ctx context.Context, absRepo, task, gateDir string)
 
 	res.Diff, res.FilesChanged = e.collectDiff(ctx, absRepo)
 
-	// Engine gate: after a killed round with partial work, prove the gate ourselves.
-	if res.Stopped == "timeout" && strings.TrimSpace(res.Diff) != "" {
-		e.runEngineGate(ctx, absRepo, &res)
+	// Engine gate: any round that returns a non-empty diff is gated.
+	// - Killed rounds (Stopped=="timeout") keep the original adapter byte-identical.
+	// - Normal rounds with a diff get the engine's own measurement alongside the worker's claim.
+	// - Empty diff means the round changed nothing — nothing to gate.
+	if strings.TrimSpace(res.Diff) != "" {
+		if res.Stopped == "timeout" {
+			// Killed rounds: prove the gate ourselves (byte-identical to the original path).
+			e.runEngineGate(ctx, absRepo, &res)
+		} else {
+			applyEngineGate(&res, absRepo)
+		}
 	}
 
 	return res
+}
+
+// applyEngineGate runs the repo's gate on a normal (non-killed) round with a
+// non-empty diff, attaching the engine's own measurement to the result so the
+// caller can compare it against the worker's claim. It is factored out of
+// implementCC so it can be unit-tested without a live worker subprocess.
+func applyEngineGate(res *Result, repo string) {
+	res.WorkerVerdict = deriveWorkerVerdict(res.LastTest)
+	o := runRepoGate(repo)
+	if o.Ran {
+		res.EngineGateCmd = o.Cmd
+		out := o.Output
+		if len(out) > 8000 {
+			out = "[truncated]\n" + out[len(out)-8000:]
+		}
+		res.EngineGateOutput = out
+		res.GateSource = "engine"
+		res.GateVerdict = o.Verdict
+	} else {
+		res.Err += "\nengine gate not run: " + o.NotRunReason
+	}
+	res.Summary += engineGateNote(o, res.WorkerVerdict)
 }
 
 // ccProofComplete is the pass condition frozen in V6: a red->green flip seen in
@@ -831,35 +861,32 @@ func gateShell() (string, string) {
 	return "bash", "-c"
 }
 
-// runEngineGate runs the repo's gate after a killed round with partial work on
-// disk. It creates its own short-lived context — independent from the round's
-// cancelled one — because the gate is an independent check bounded by its own
-// timeout.
-//
-// The verdict lands in GateVerdict (machine-readable) and the output in
-// LastTest; Err carries only the cases where no gate ran at all, which are
-// diagnoses of the round rather than judgements of the work.
-func (e *Engine) runEngineGate(_ context.Context, repo string, res *Result) {
+// gateOutcome is what one run of the repo's gate produced. Ran is false when
+// no gate executed at all, and NotRunReason says which of the three reasons.
+type gateOutcome struct {
+	Ran          bool
+	Verdict      string // "pass" | "fail"; empty when !Ran
+	Cmd          string
+	Output       string
+	NotRunReason string // e.g. "no recognised repo shape"; empty when Ran
+}
+
+func runRepoGate(repo string) gateOutcome {
 	tool, ok := gate.DetectGateTool(repo)
 	if !ok {
-		res.Err += "\nengine gate not run: no recognised repo shape"
-		return
+		return gateOutcome{NotRunReason: "no recognised repo shape"}
 	}
 
 	cmdName := tool.Cmd
 	if _, err := exec.LookPath(cmdName); err != nil {
 		if found := gate.FindOffPath(tool, repo); found != "" {
-			res.Err += fmt.Sprintf("\nengine gate not run: toolchain %s not on PATH (found at %s)", cmdName, found)
-		} else {
-			res.Err += fmt.Sprintf("\nengine gate not run: toolchain %s not on PATH", cmdName)
+			return gateOutcome{NotRunReason: fmt.Sprintf("toolchain %s not on PATH (found at %s)", cmdName, found)}
 		}
-		return
+		return gateOutcome{NotRunReason: fmt.Sprintf("toolchain %s not on PATH", cmdName)}
 	}
 
 	gateCtx, cancel := context.WithTimeout(context.Background(), engineGateTimeout)
 	defer cancel()
-	// Independent from the round's cancelled context. Short on purpose: the gate
-	// compiles and tests existing code — it never iterates.
 
 	shell, shellFlag := gateShell()
 	cmd := exec.CommandContext(gateCtx, shell, shellFlag, tool.Verify)
@@ -873,23 +900,89 @@ func (e *Engine) runEngineGate(_ context.Context, repo string, res *Result) {
 	output := out.String()
 
 	if err != nil {
-		// Check if it was a timeout (the context was cancelled by its own deadline)
 		if gateCtx.Err() != nil {
-			res.Err += fmt.Sprintf("\nengine gate not run: gate exceeded %v engine timeout", engineGateTimeout)
-			return
+			return gateOutcome{NotRunReason: fmt.Sprintf("gate exceeded %v engine timeout", engineGateTimeout)}
 		}
-
-		// Gate ran but failed
-		res.LastTestCmd = tool.Verify
-		res.LastTest = "[ENGINE-RUN GATE — not demonstrated by the worker]\n" + output
-		res.GateSource = "engine"
-		res.GateVerdict = "fail"
-		return
+		return gateOutcome{Ran: true, Verdict: "fail", Cmd: tool.Verify, Output: output}
 	}
 
-	// Gate ran and passed
-	res.LastTestCmd = tool.Verify
-	res.LastTest = "[ENGINE-RUN GATE — not demonstrated by the worker]\n" + output
+	return gateOutcome{Ran: true, Verdict: "pass", Cmd: tool.Verify, Output: output}
+}
+
+// runEngineGate runs the repo's gate after a killed round with partial work on
+// disk. It creates its own short-lived context — independent from the round's
+// cancelled one — because the gate is an independent check bounded by its own
+// timeout. It is now the killed-round adapter over the shared runRepoGate runner.
+//
+// The verdict lands in GateVerdict (machine-readable) and the output in
+// LastTest; Err carries only the cases where no gate ran at all, which are
+// diagnoses of the round rather than judgements of the work.
+func (e *Engine) runEngineGate(_ context.Context, repo string, res *Result) {
+	o := runRepoGate(repo)
+	if !o.Ran {
+		res.Err += "\nengine gate not run: " + o.NotRunReason
+		return
+	}
+	res.LastTestCmd = o.Cmd
+	res.LastTest = "[ENGINE-RUN GATE — not demonstrated by the worker]\n" + o.Output
 	res.GateSource = "engine"
-	res.GateVerdict = "pass"
+	res.GateVerdict = o.Verdict
+}
+
+// engineGateNote is the block appended to the round summary so the caller
+// reads the engine's own measurement next to the worker's claim. The two are
+// different facts and are always stated as two facts.
+func engineGateNote(o gateOutcome, workerVerdict string) string {
+	prefix := "\n\n"
+	if !o.Ran {
+		return prefix + "ENGINE GATE NOT RUN: " + o.NotRunReason +
+			". This is the absence of a verdict, not a failing verdict. " +
+			"The worker reported: " + workerVerdict + " — unverified."
+	}
+	cmdStr := "`" + o.Cmd + "`"
+	switch {
+	case o.Verdict == workerVerdict:
+		return prefix + "ENGINE GATE: " + o.Verdict +
+			" — measured by rig running " + cmdStr + " (RIG_* scrubbed). " +
+			"WORKER CLAIMED: " + workerVerdict + ". Agreed."
+	default:
+		return prefix + "ENGINE GATE DISAGREES WITH THE WORKER. " +
+			"The engine measured: " + o.Verdict + ", running " + cmdStr +
+			" itself. The worker reported: " + workerVerdict +
+			". The engine-measured verdict is the one that was demonstrated; " +
+			"the worker's account of this round is not evidence."
+	}
+}
+
+// deriveWorkerVerdict classifies what the WORKER's own reported test output
+// claims. It is a claim, never a measurement — it stays in its own field so a
+// caller can never mistake it for something the engine demonstrated.
+func deriveWorkerVerdict(lastTest string) string {
+	if lastTest == "" {
+		return "unknown"
+	}
+	failMarkers := []string{"--- FAIL", "FAIL", "build failed", "panic:", "Traceback", "error:", "Error:"}
+	passMarkers := []string{"ok ", "PASS", "passed"}
+	haveFail := false
+	havePass := false
+	for _, m := range failMarkers {
+		if strings.Contains(lastTest, m) {
+			haveFail = true
+			break
+		}
+	}
+	for _, m := range passMarkers {
+		if strings.Contains(lastTest, m) {
+			havePass = true
+			break
+		}
+	}
+	// Failure markers win over pass markers.
+	if haveFail {
+		return "fail"
+	}
+	if havePass {
+		return "pass"
+	}
+	return "unknown"
 }

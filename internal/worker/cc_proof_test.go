@@ -273,16 +273,17 @@ func TestCCProofContractText(t *testing.T) {
 			t.Errorf("ccSystemPrompt missing required substring: %q", substr)
 		}
 	}
-	// ccProofRetryInstr must contain stash commands, but NOT destructive reset patterns
+	// The retry instruction must contain stash commands, but NOT destructive reset patterns
+	retryInstr := ccProofRetryInstrFor(ccStashTag())
 	for _, substr := range []string{"git stash push -u", "git stash pop"} {
-		if !strings.Contains(ccProofRetryInstr, substr) {
-			t.Errorf("ccProofRetryInstr missing required substring: %q", substr)
+		if !strings.Contains(retryInstr, substr) {
+			t.Errorf("retry instruction missing required substring: %q", substr)
 		}
 	}
 	// "git checkout -- ." appears only in a parenthetical contrast ("a plain `git checkout -- .` cannot
 	// revert an untracked new file"), not as the actual instruction — so we don't assert its absence.
 	// What matters is it does NOT carry the other destructive pattern:
-	if strings.Contains(ccProofRetryInstr, "git diff > /tmp/rig_fix.patch") {
-		t.Error("ccProofRetryInstr must NOT contain: \"git diff > /tmp/rig_fix.patch\"")
+	if strings.Contains(retryInstr, "git diff > /tmp/rig_fix.patch") {
+		t.Error("retry instruction must NOT contain: \"git diff > /tmp/rig_fix.patch\"")
 	}
 }

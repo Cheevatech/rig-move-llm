@@ -25,6 +25,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -76,25 +78,63 @@ with the line: PROOF: <the exact test command you ran red, then green>.
 Rules: do not ask questions — act. Do not touch files under .gate/ or .gate.frozen/. Do not
 refactor, rename, or "improve" anything you were not asked to change. Do not commit.`
 
-// ccProofRetryInstr is the single worker-side retry (P5 fixup shape: one shot,
-// decided by the engine, MAIN never re-enters the loop). The fix is already in
-// the tree, so red needs a temporary revert that also removes any files the
-// previous session created (untracked), not just tracked edits.
-const ccProofRetryInstr = `PROOF MISSING: a previous session already applied a fix to this
+// ccStashTag returns a label unique to one retry. `git stash pop` is positional
+// — it restores stash@{0} no matter who pushed it — so a stash left on the
+// stack by any earlier session is what a bare pop hands back (#54: a leftover
+// from the previous day's volley was restored over a round's own finished work,
+// leaving conflict markers in a source file and destroying 21 iterations). The
+// tag is what lets the pop name this round's own entry instead of a position.
+func ccStashTag() string {
+	var b [6]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// Randomness is a nicety here, not a security property: any value that
+		// does not collide with a stale entry works, and the pid plus clock
+		// cannot collide with a stash pushed by an earlier process.
+		return fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
+}
+
+func ccStashLabel(tag string) string { return "rig-fix-" + tag }
+
+func ccStashPushCmd(tag string) string {
+	return "git stash push -u -m " + ccStashLabel(tag)
+}
+
+// ccStashPopCmd resolves this round's stash by its label at pop time. Anything
+// else on the stack — a stranger's leftover, or an entry the worker itself
+// pushed meanwhile — stays where it is.
+func ccStashPopCmd(tag string) string {
+	label := ccStashLabel(tag)
+	return "git stash pop \"$(git stash list | grep -F " + label + " | head -n1 | cut -d: -f1)\""
+}
+
+// ccProofRetryInstrFor is the single worker-side retry (P5 fixup shape: one
+// shot, decided by the engine, MAIN never re-enters the loop). The fix is
+// already in the tree, so red needs a temporary revert that also removes any
+// files the previous session created (untracked), not just tracked edits.
+func ccProofRetryInstrFor(tag string) string {
+	return `PROOF MISSING: a previous session already applied a fix to this
 working tree but produced no red->green proof-of-flip evidence. Complete the proof now WITHOUT
 redoing the fix:
-1. Save AND revert the fix in one step:  git stash push -u -m rig-fix
+1. Save AND revert the fix in one step:  ` + ccStashPushCmd(tag) + `
    (-u also stashes files the previous session CREATED; a plain ` + "`" + `git checkout -- .` + "`" + ` cannot
    revert an untracked new file, so the red state would be impossible without it.)
+   Use that command verbatim — the label is this round's own, and the pop below finds it by
+   that label. Do not run a bare ` + "`" + `git stash` + "`" + `, and do not touch any other entry on the
+   stack: entries left by earlier sessions are not yours to restore or drop.
 2. Only NOW write rig_proof_test.py at the repo root asserting the EXPECTED behaviour from the
    task — write it after the stash so it is not part of the stash and cannot conflict on pop.
 3. Run it with the repo's test runner (e.g. ./.venv/bin/python -m pytest -q rig_proof_test.py)
    — it MUST FAIL (red). If the task was to CREATE new code, the failure is the missing
    module/file (ModuleNotFoundError / ImportError / FileNotFoundError) — that is the correct red.
-4. Re-apply the fix:  git stash pop
-   If pop reports a conflict, resolve it by KEEPING the stashed version (the fix).
+4. Re-apply the fix, verbatim:  ` + ccStashPopCmd(tag) + `
+   This pop restores THIS round's work and nothing else. If it still reports a conflict, STOP:
+   do not resolve it and do not edit the conflicted file. Reply saying the pop conflicted and
+   name the file — a tree with conflict markers in it is worse than a missing proof.
 5. Rerun the SAME test command byte-for-byte — it MUST PASS (green).
 6. Delete rig_proof_test.py, then reply with a short summary ending with the PROOF line.`
+}
 
 // implementCC runs one implement call as a `claude -p` subprocess in the repo,
 // parses its stream-json output, and returns the same Result shape the 3-tool
@@ -132,7 +172,7 @@ func (e *Engine) implementCC(ctx context.Context, absRepo, task, gateDir string)
 		logStderr("cc: done without proof-of-flip — one worker-side retry")
 		var res2 Result
 		retryProof := &ccProof{}
-		if e.runCCOnce(ctx, bin, base, absRepo, user+"\n\n"+ccProofRetryInstr, &res2, retryProof, false) {
+		if e.runCCOnce(ctx, bin, base, absRepo, user+"\n\n"+ccProofRetryInstrFor(ccStashTag()), &res2, retryProof, false) {
 			res.Iterations += res2.Iterations
 			res.InputTokens += res2.InputTokens
 			res.OutputTokens += res2.OutputTokens

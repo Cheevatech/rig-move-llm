@@ -247,7 +247,8 @@ func TestGuardsRung(t *testing.T) {
 		if r.status != rungPass {
 			t.Fatalf("status = %s, want PASS (%s)", r.status.label(), r.detail)
 		}
-		for _, want := range []string{worker.StallGuard().String(), worker.WallGuard().String(), worker.ClientCallTimeout().String(), "budget"} {
+		for _, want := range []string{worker.StallGuard().String(), worker.WallGuard().String(),
+			worker.GateCredit().String(), worker.WallCeiling().String(), worker.ClientCallTimeout().String(), "budget"} {
 			if !strings.Contains(r.detail, want) {
 				t.Errorf("detail missing %q:\n%s", want, r.detail)
 			}

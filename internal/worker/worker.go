@@ -169,6 +169,14 @@ func (e *Engine) Implement(ctx context.Context, repo, task, gateDir string) Resu
 		return e.implementCC(ctx, absRepo, task, gateDir)
 	}
 
+	// The caller's deadline is now WallCeiling (#57), which only the cc engine
+	// knows how to spend: it discounts gate time and enforces the wall itself.
+	// This loop has no such accounting, so it keeps the plain wall it was
+	// calibrated against.
+	loopCtx, cancelLoop := context.WithTimeout(ctx, runTimeout())
+	defer cancelLoop()
+	ctx = loopCtx
+
 	user := task
 	if gateDir != "" {
 		user += "\n\n(A frozen test contract exists under " + gateDir + " — do not modify it; make the product code pass it.)"

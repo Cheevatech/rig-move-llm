@@ -20,8 +20,12 @@ import (
 // If this fails, a long round is killed by the client again and rig never gets to
 // return a diagnosis.
 func TestRunTimeoutStaysUnderTheClientCallTimeout(t *testing.T) {
-	if got, client := runTimeout(), ClientCallTimeout(); got >= client {
-		t.Fatalf("runTimeout()=%s must stay below the %s per-call timeout rig declares to the client", got, client)
+	// The bound that matters is the CEILING, not the wall: since #57 the wall
+	// budgets working time and the ceiling is the longest a round can actually
+	// take. Asserting only on the wall would let a gate credit push the real
+	// duration past the client's limit unnoticed.
+	if got, client := WallCeiling(), ClientCallTimeout(); got >= client {
+		t.Fatalf("WallCeiling()=%s must stay below the %s per-call timeout rig declares to the client", got, client)
 	}
 }
 
@@ -40,8 +44,8 @@ func TestGuardLadder(t *testing.T) {
 	if stall >= wall {
 		t.Errorf("stall guard %s must fire before the wall guard %s", stall, wall)
 	}
-	if wall >= clientWatchdog {
-		t.Errorf("wall guard %s must fire before the %s client watchdog", wall, clientWatchdog)
+	if ceiling := WallCeiling(); ceiling >= clientWatchdog {
+		t.Errorf("wall ceiling %s must fire before the %s client watchdog", ceiling, clientWatchdog)
 	}
 }
 
@@ -68,15 +72,32 @@ func TestCCTimeoutDiagnosis(t *testing.T) {
 		}
 	})
 
-	t.Run("wall guard fires on an expired context", func(t *testing.T) {
+	t.Run("wall guard reports working time next to elapsed", func(t *testing.T) {
+		act := newCCActivity()
+		act.touch("Bash npm test")
+		act.markWalled()
+		msg, stopped := ccTimeoutDiagnosis(context.Background(), act)
+		if stopped != "timeout" {
+			t.Fatalf("stopped = %q, want timeout", stopped)
+		}
+		// The two numbers are the whole point of #57: MAIN must be able to see
+		// that the round was killed for working time, not for sitting in a gate.
+		for _, want := range []string{"wall guard", "working time", "credited to gate runs", "npm test"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("diagnosis missing %q:\n%s", want, msg)
+			}
+		}
+	})
+
+	t.Run("the ceiling fires on an expired context", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		msg, stopped := ccTimeoutDiagnosis(ctx, newCCActivity())
 		if stopped != "timeout" {
 			t.Fatalf("stopped = %q, want timeout", stopped)
 		}
-		if !strings.Contains(msg, "wall guard") || !strings.Contains(msg, "no stream output at all") {
-			t.Errorf("diagnosis does not describe the wall stall:\n%s", msg)
+		if !strings.Contains(msg, "wall ceiling") || !strings.Contains(msg, "no stream output at all") {
+			t.Errorf("diagnosis does not describe the ceiling:\n%s", msg)
 		}
 	})
 }

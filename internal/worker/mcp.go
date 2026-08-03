@@ -45,14 +45,41 @@ func runTimeout() time.Duration {
 	return time.Duration(envInt("RIG_WORKER_RUN_TIMEOUT", 3000)) * time.Second
 }
 
+// gateCredit bounds how much time spent INSIDE the repo's gate the wall guard is
+// willing to excuse (#57). The wall exists to stop a worker that is going
+// nowhere; a worker sitting in `cargo test` is going somewhere, it is just doing
+// it behind a compiler. Measured 2026-08-02 (map15 M1, tj/commander.js): round 3
+// was killed at the 50-minute wall in the middle of `node --test`, so the whole
+// round — including work already on disk — was thrown away and the task needed
+// two more rounds. The guards were calibrated on repos whose gate is ~2s
+// (spf13/cobra, pallets/click); `cargo test` cold is 55s a call, and a worker
+// that runs it ten times has spent ~9 minutes of wall doing nothing but waiting
+// for a build.
+//
+// It is a CREDIT, not an exemption: gate time is discounted from the wall budget
+// only up to this much, so a worker looping on its test command forever still
+// dies — at WallCeiling. 0 restores the pre-#57 behaviour (no credit at all).
+func gateCredit() time.Duration {
+	return time.Duration(envInt("RIG_WORKER_GATE_CREDIT", 1200)) * time.Second
+}
+
+// WallCeiling is the absolute end-to-end bound on one implement call: the wall
+// guard plus every second of gate time it may excuse. The wall guard measures
+// WORKING time (elapsed minus gate time) and so can, by construction, let a
+// round run longer than runTimeout; the ceiling is what keeps that bounded and
+// keeps the ladder stall < wall < ceiling < client intact.
+func WallCeiling() time.Duration {
+	return runTimeout() + gateCredit()
+}
+
 // ClientCallTimeout is the wall-clock limit rig asks the CALLING client to apply
 // to one worker tool call — written into the generated .mcp.json as the worker
-// server's `timeout`. It sits above runTimeout so the engine always kills its own
+// server's `timeout`. It sits above WallCeiling so the engine always kills its own
 // round first, and it does double duty on Claude Code v2.1.203+: a per-server
 // timeout of at least 1s is also a floor on the idle timeout, so a round that is
 // working quietly is no longer aborted at the 30-minute stdio idle window.
 func ClientCallTimeout() time.Duration {
-	return runTimeout() + 5*time.Minute
+	return WallCeiling() + 5*time.Minute
 }
 
 // exploreTimeout bounds a single explore call. It is MUCH tighter than
@@ -285,7 +312,10 @@ func (s *Server) onToolsCall(params json.RawMessage) (map[string]any, *rpcError)
 
 	s.noteRepo(args.Repo)
 
-	ctx, cancel := context.WithTimeout(context.Background(), runTimeout())
+	// The ceiling, not the wall: the wall guard now lives in the engine, which is
+	// the only layer that can see when the worker is inside its gate and discount
+	// that time (#57). This deadline is the backstop for when it cannot.
+	ctx, cancel := context.WithTimeout(context.Background(), WallCeiling())
 	defer cancel()
 	logStderr("worker.implement repo=%s gate=%s", args.Repo, args.GateDir)
 	res := s.engine.Implement(ctx, args.Repo, args.Task, args.GateDir)

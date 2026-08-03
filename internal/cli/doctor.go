@@ -599,21 +599,26 @@ func FindOffPath(t GateTool, repo string) string {
 
 // --- rung 7: the guards ---------------------------------------------------
 
-// checkGuards reports the ladder rather than judging it: stall < wall < the
-// per-call timeout rig declares to the client (#33). Ordering is enforced by
-// tests in the worker package; what a user needs here is the effective numbers
-// and where each came from, because an env override is invisible in config.env.
+// checkGuards reports the ladder rather than judging it: stall < wall < ceiling
+// < the per-call timeout rig declares to the client (#33, #57). Ordering is
+// enforced by tests in the worker package; what a user needs here is the
+// effective numbers and where each came from, because an env override is
+// invisible in config.env. The gate credit is printed next to the wall because
+// it is the difference between the two: the wall budgets WORKING time, and the
+// ceiling is what that can grow to once gate time is excused.
 func checkGuards() rung {
 	const name = "guards"
-	stall, wall, client := worker.StallGuard(), worker.WallGuard(), worker.ClientCallTimeout()
-	detail := fmt.Sprintf("stall %s%s < wall %s%s < client %s; delegation budget %d/turn%s",
+	stall, wall := worker.StallGuard(), worker.WallGuard()
+	credit, ceiling, client := worker.GateCredit(), worker.WallCeiling(), worker.ClientCallTimeout()
+	detail := fmt.Sprintf("stall %s%s < wall %s%s (+%s gate credit%s) < ceiling %s < client %s; delegation budget %d/turn%s",
 		stall, envSource("RIG_CC_STALL_TIMEOUT"),
 		wall, envSource("RIG_WORKER_RUN_TIMEOUT"),
-		client,
+		credit, envSource("RIG_WORKER_GATE_CREDIT"),
+		ceiling, client,
 		maxDelegateRounds(), envSource("RIG_MAX_DELEGATE_ROUNDS"))
-	if stall >= wall || wall >= client {
+	if stall >= wall || wall > ceiling || ceiling >= client {
 		return fail(name, detail,
-			"restore the ordering stall < wall < client, or the round is killed by someone who cannot explain why")
+			"restore the ordering stall < wall <= ceiling < client, or the round is killed by someone who cannot explain why")
 	}
 	return pass(name, detail)
 }

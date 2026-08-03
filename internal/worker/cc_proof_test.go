@@ -287,3 +287,61 @@ func TestCCProofContractText(t *testing.T) {
 		t.Error("retry instruction must NOT contain: \"git diff > /tmp/rig_fix.patch\"")
 	}
 }
+
+// Deleting the proof test but not its bytecode left rig's own
+// __pycache__/rig_proof_test.cpython-3XX.pyc in the diff the caller reviews. It
+// never failed a gate, which is why it survived — and the diff is exactly what a
+// human reads to decide whether to trust the round.
+func TestRemoveProofArtifacts(t *testing.T) {
+	t.Run("the proof test and its bytecode both go", func(t *testing.T) {
+		repo := t.TempDir()
+		cache := filepath.Join(repo, "__pycache__")
+		if err := os.MkdirAll(cache, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		mustTouch := func(p string) {
+			t.Helper()
+			if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		mustTouch(filepath.Join(repo, ccProofFile))
+		mustTouch(filepath.Join(cache, "rig_proof_test.cpython-311.pyc"))
+
+		removeProofArtifacts(repo)
+
+		if _, err := os.Stat(filepath.Join(repo, ccProofFile)); !os.IsNotExist(err) {
+			t.Error("the proof test survived")
+		}
+		if _, err := os.Stat(filepath.Join(cache, "rig_proof_test.cpython-311.pyc")); !os.IsNotExist(err) {
+			t.Error("rig's own bytecode survived into the diff")
+		}
+		if _, err := os.Stat(cache); !os.IsNotExist(err) {
+			t.Error("a __pycache__ that held only rig's bytecode should go with it")
+		}
+	})
+
+	t.Run("the repo's own bytecode is not touched", func(t *testing.T) {
+		repo := t.TempDir()
+		cache := filepath.Join(repo, "__pycache__")
+		if err := os.MkdirAll(cache, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		theirs := filepath.Join(cache, "app.cpython-311.pyc")
+		if err := os.WriteFile(theirs, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cache, "rig_proof_test.cpython-311.pyc"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		removeProofArtifacts(repo)
+
+		if _, err := os.Stat(theirs); err != nil {
+			t.Errorf("deleted the repo's own bytecode: %v", err)
+		}
+		if _, err := os.Stat(cache); err != nil {
+			t.Errorf("deleted a __pycache__ that still had the repo's own files: %v", err)
+		}
+	})
+}

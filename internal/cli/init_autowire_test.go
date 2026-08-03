@@ -376,3 +376,66 @@ func TestInitPreservesUserCLAUDEmd(t *testing.T) {
 		t.Errorf("user CLAUDE.md removed/modified by uninstall: err=%v content=%q", err, got2)
 	}
 }
+
+// #56 reported that `uninstall` leaves an empty project entry behind in
+// ~/.claude.json — proven on v0.7.5, on a clone under a live dogfood HOME.
+//
+// It does not reproduce. revokeWorkspaceTrust has deleted an entry that carried
+// nothing but rig's flag since v0.7.0 (369a967), which is BEFORE the version the
+// report was filed against, and the unit tests in trust_test.go pin that. What
+// was missing is a test of the path the report actually walked: the whole
+// init --trust-workspace / uninstall cycle through the commands, not the helper.
+// So the residue came from something other than rig forgetting to delete it —
+// most plausibly a Claude Code process alive in that HOME rewriting .claude.json
+// from its own state after uninstall, which is a race rig cannot win and should
+// not try to.
+//
+// This test is the pin: end to end, through the commands, the entry goes.
+func TestUninstallLeavesNoEmptyProjectEntry(t *testing.T) {
+	home := t.TempDir()
+	proj := t.TempDir()
+	t.Setenv("HOME", home)
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(proj); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(wd)
+
+	// A .claude.json that already has another project in it: the entry rig makes
+	// must go, and the neighbour must not.
+	other := "/somewhere/else"
+	seed, _ := json.Marshal(map[string]any{"projects": map[string]any{
+		other: map[string]any{"history": []any{"a prompt"}},
+	}})
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), seed, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if rc := cmdInit([]string{"--no-detect", "--trust-workspace", "--backend", "ollama",
+		"--worker-base", "http://localhost:11434/v1", "--worker-model", "m"}); rc != 0 {
+		t.Fatalf("cmdInit rc=%d", rc)
+	}
+
+	canon, _ := filepath.EvalSymlinks(proj)
+	projects := readProjects(t)
+	entry, ok := projects[canon].(map[string]any)
+	if !ok || entry["hasTrustDialogAccepted"] != true {
+		t.Fatalf("init --trust-workspace did not grant trust for %s: %v", canon, projects)
+	}
+
+	if rc := cmdUninstall(nil); rc != 0 {
+		t.Fatalf("cmdUninstall rc=%d", rc)
+	}
+
+	projects = readProjects(t)
+	if e, still := projects[canon]; still {
+		t.Errorf("uninstall left a project entry behind (#56): %v", e)
+	}
+	if n, ok := projects[other].(map[string]any); !ok || len(n["history"].([]any)) != 1 {
+		t.Errorf("uninstall touched a project that was not rig's: %v", projects[other])
+	}
+}

@@ -117,6 +117,50 @@ func TestGateToolchainRung(t *testing.T) {
 			t.Errorf("status = %s, want SKIP — rig must not invent a gate it cannot infer", r.status.label())
 		}
 	})
+
+	// The rung reads internal/gate, the same table the worker engine runs from
+	// (#59). It used to keep its own byte-identical copy, and the day the two
+	// drifted this rung would bless a shape the worker cannot actually gate. An
+	// ecosystem that exists in only one of the two copies proves which one this
+	// reads.
+	t.Run("it reads the shared table, not a private copy", func(t *testing.T) {
+		repo := t.TempDir()
+		mustWrite(t, filepath.Join(repo, "mix.exs"), "defmodule X do\nend\n")
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("PATH", t.TempDir())
+
+		r := checkGateToolchain(repo)
+
+		if r.status == rungSkip {
+			t.Fatal("an Elixir repo is a recognised shape in internal/gate — this rung is reading something else")
+		}
+		if !strings.Contains(r.detail, "mix test") {
+			t.Errorf("detail should name the shared table's gate command:\n%s", r.detail)
+		}
+	})
+
+	// A wrapper is in the repo, so PATH is the wrong question — asking it
+	// reported a missing toolchain for every Gradle/Maven-wrapper repo there is.
+	t.Run("a repo-local wrapper is not looked for on PATH", func(t *testing.T) {
+		repo := t.TempDir()
+		mustWrite(t, filepath.Join(repo, "build.gradle"), "")
+		wrapper := filepath.Join(repo, "gradlew")
+		mustWrite(t, wrapper, "#!/bin/sh\n")
+		if err := os.Chmod(wrapper, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("PATH", t.TempDir())
+
+		r := checkGateToolchain(repo)
+
+		if r.status != rungPass {
+			t.Fatalf("status = %s, want PASS — the wrapper is right there (%s)", r.status.label(), r.detail)
+		}
+		if !strings.Contains(r.detail, "./gradlew test") {
+			t.Errorf("detail should name the wrapper gate:\n%s", r.detail)
+		}
+	})
 }
 
 // The lesson from the mangled worker key: /v1/models answered 200 unauthenticated

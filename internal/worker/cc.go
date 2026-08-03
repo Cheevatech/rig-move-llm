@@ -237,7 +237,10 @@ func ccWritesFiles(name string) bool {
 // implementCC so it can be unit-tested without a live worker subprocess.
 func applyEngineGate(res *Result, repo string) {
 	res.WorkerVerdict = deriveWorkerVerdict(res.LastTest)
-	o := runRepoGate(repo)
+	// res.LastTestCmd is the gate the WORKER ran this round; it is the fallback
+	// for a repo whose shape declares nothing (#59), and it must be read before
+	// anything below overwrites it.
+	o := runRepoGate(repo, res.LastTestCmd)
 	if o.Ran {
 		res.EngineGateCmd = o.Cmd
 		out := o.Output
@@ -684,10 +687,7 @@ func (e *Engine) parseCCStream(r interface{ Read([]byte) (int, error) }, mirror 
 					proof.observe(cmd, ccResultText(b), b.IsError)
 				}
 				// Same rule as the 3-tool loop's gate pick: only a command that
-				// RUNS code can verify it; `git diff`/`ls` cannot. The pick
-				// travels with the output via LastTestCmd... which C0's Result
-				// does not carry — so here it stays internal and LastTest holds
-				// the latest gate-shaped output only.
+				// RUNS code can verify it; `git diff`/`ls` cannot.
 				if !ok || !ccIsGateCommand(cmd) {
 					continue
 				}
@@ -696,6 +696,12 @@ func (e *Engine) parseCCStream(r interface{ Read([]byte) (int, error) }, mirror 
 				// green gate goes missing from the return.
 				if txt := ccResultText(b); txt != "" {
 					res.LastTest = txt
+					// The command travels with its output, as it already does on
+					// the 3-tool loop (engine parity). It is also the engine
+					// gate's last-resort fallback on a repo whose shape rig does
+					// not recognise (#59) — for a language rig has never heard
+					// of, this is the only gate command that exists.
+					res.LastTestCmd = cmd
 				}
 			}
 		case "result":
@@ -934,34 +940,54 @@ func gateShell() (string, string) {
 }
 
 // gateOutcome is what one run of the repo's gate produced. Ran is false when
-// no gate executed at all, and NotRunReason says which of the three reasons.
+// no gate executed at all, and NotRunReason says which of the reasons.
 type gateOutcome struct {
 	Ran          bool
 	Verdict      string // "pass" | "fail"; empty when !Ran
 	Cmd          string
 	Output       string
 	NotRunReason string // e.g. "no recognised repo shape"; empty when Ran
+
+	// Source says where Cmd came from: "repo-shape" when a marker in the repo
+	// implied it, "worker-observed" when it is the command the worker itself ran
+	// (#59). The engine executed it either way — the verdict is the engine's own
+	// measurement, never the worker's word — but a gate the WORKER chose is
+	// weaker evidence than one the repo declares, and the caller is told which
+	// kind it got rather than being left to assume the stronger one.
+	Source string
 }
 
-func runRepoGate(repo string) gateOutcome {
-	tool, ok := gate.DetectGateTool(repo)
-	if !ok {
-		return gateOutcome{NotRunReason: "no recognised repo shape"}
-	}
-
-	cmdName := tool.Cmd
-	if _, err := exec.LookPath(cmdName); err != nil {
-		if found := gate.FindOffPath(tool, repo); found != "" {
-			return gateOutcome{NotRunReason: fmt.Sprintf("toolchain %s not on PATH (found at %s)", cmdName, found)}
+// runRepoGate runs the repo's gate and reports the engine's own verdict.
+//
+// workerGateCmd is the gate command the worker was observed running in this repo
+// during the round, used only when the repo's shape implies nothing. It is the
+// escape hatch that makes the gate language-agnostic without a table that has to
+// grow forever (#59): rig cannot know every ecosystem's test command, but the
+// worker just demonstrated one that works HERE. Re-running it is not trusting the
+// worker — the engine runs it itself, with RIG_* scrubbed, and reads the exit
+// code itself, so a worker that lied about the result is still caught. It buys no
+// new blast radius either: that command already ran in this repo, in this round.
+func runRepoGate(repo, workerGateCmd string) gateOutcome {
+	verify, source := "", "repo-shape"
+	if tool, ok := gate.DetectGateTool(repo); ok {
+		if _, found := tool.Available(repo, exec.LookPath); !found {
+			if off := gate.FindOffPath(tool, repo); off != "" {
+				return gateOutcome{NotRunReason: fmt.Sprintf("toolchain %s not on PATH (found at %s)", tool.Cmd, off)}
+			}
+			return gateOutcome{NotRunReason: fmt.Sprintf("toolchain %s not on PATH", tool.Cmd)}
 		}
-		return gateOutcome{NotRunReason: fmt.Sprintf("toolchain %s not on PATH", cmdName)}
+		verify = tool.Verify
+	} else if c := strings.TrimSpace(workerGateCmd); c != "" && ccIsGateCommand(c) {
+		verify, source = c, "worker-observed"
+	} else {
+		return gateOutcome{NotRunReason: "no recognised repo shape, and the worker ran no gate command of its own to fall back on"}
 	}
 
 	gateCtx, cancel := context.WithTimeout(context.Background(), engineGateTimeout)
 	defer cancel()
 
 	shell, shellFlag := gateShell()
-	cmd := exec.CommandContext(gateCtx, shell, shellFlag, tool.Verify)
+	cmd := exec.CommandContext(gateCtx, shell, shellFlag, verify)
 	cmd.Dir = repo
 	cmd.Env = gateEnv()
 	var out bytes.Buffer
@@ -975,10 +1001,47 @@ func runRepoGate(repo string) gateOutcome {
 		if gateCtx.Err() != nil {
 			return gateOutcome{NotRunReason: fmt.Sprintf("gate exceeded %v engine timeout", engineGateTimeout)}
 		}
-		return gateOutcome{Ran: true, Verdict: "fail", Cmd: tool.Verify, Output: output}
+		// A command that does not APPLY to this repo exits non-zero too, and
+		// calling that "fail" would blame the change for the gate being wrong.
+		// The reasoning is the one already written into gateEnv: a verdict that is
+		// wrong is worse than the missing verdict #41 set out to fix.
+		if why := gateInapplicable(output); why != "" {
+			return gateOutcome{NotRunReason: fmt.Sprintf("`%s` does not apply to this repo (%s)", verify, why)}
+		}
+		return gateOutcome{Ran: true, Verdict: "fail", Cmd: verify, Output: output, Source: source}
 	}
 
-	return gateOutcome{Ran: true, Verdict: "pass", Cmd: tool.Verify, Output: output}
+	return gateOutcome{Ran: true, Verdict: "pass", Cmd: verify, Output: output, Source: source}
+}
+
+// gateInapplicableMarkers are the unmistakable ways a build tool says "you asked
+// me to run something I do not have", as opposed to "your tests failed". Each one
+// is a message the tool emits INSTEAD of running anything, so misreading it as a
+// failing gate accuses a change that was never tested.
+//
+// The list is deliberately short and literal. A fuzzy match here would silently
+// convert real failures into "not run", which is the dangerous direction: a
+// missing verdict is visible in the return, a suppressed one is not.
+var gateInapplicableMarkers = []struct{ needle, why string }{
+	{"missing script: test", "package.json declares no test script"},
+	{"no rule to make target 'test'", "the Makefile declares no test target"},
+	{"no rule to make target `test'", "the Makefile declares no test target"},
+	{"no such command", "the subcommand does not exist for this toolchain"},
+	{"command not found", "the gate command is not installed"},
+	{"is not recognized as an internal or external command", "the gate command is not installed"},
+	{"could not find or load main class", "the build tool is not configured in this repo"},
+	{"no tests were found", "the toolchain found no tests to run"},
+	{"error: no test specified", "the project declares no test command"},
+}
+
+func gateInapplicable(output string) string {
+	lower := strings.ToLower(output)
+	for _, m := range gateInapplicableMarkers {
+		if strings.Contains(lower, m.needle) {
+			return m.why
+		}
+	}
+	return ""
 }
 
 // runEngineGate runs the repo's gate after a killed round with partial work on
@@ -990,7 +1053,7 @@ func runRepoGate(repo string) gateOutcome {
 // LastTest; Err carries only the cases where no gate ran at all, which are
 // diagnoses of the round rather than judgements of the work.
 func (e *Engine) runEngineGate(_ context.Context, repo string, res *Result) {
-	o := runRepoGate(repo)
+	o := runRepoGate(repo, res.LastTestCmd)
 	if !o.Ran {
 		res.Err += "\nengine gate not run: " + o.NotRunReason
 		return
@@ -1012,6 +1075,13 @@ func engineGateNote(o gateOutcome, workerVerdict string) string {
 			"The worker reported: " + workerVerdict + " — unverified."
 	}
 	cmdStr := "`" + o.Cmd + "`"
+	if o.Source == "worker-observed" {
+		// Stated, not buried: rig did not know this repo's shape, so the command
+		// is the worker's own pick. The engine still RAN it and read the exit code
+		// itself, so the verdict is measured — but a worker that picks a narrow
+		// command gets a narrow gate, and the caller has to be able to see that.
+		cmdStr += " (the gate command the WORKER used — rig does not recognise this repo's shape, so it could not infer one of its own)"
+	}
 	switch {
 	case o.Verdict == workerVerdict:
 		return prefix + "ENGINE GATE: " + o.Verdict +

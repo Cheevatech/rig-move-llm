@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/Cheevatech/rig-move-llm/internal/config"
+	"github.com/Cheevatech/rig-move-llm/internal/gate"
 	"github.com/Cheevatech/rig-move-llm/internal/worker"
 )
 
@@ -509,29 +510,6 @@ func checkHookLive() rung {
 
 // --- rung 6: the gate toolchain, as the WORKER sees it (#35) --------------
 
-// GateTool is a repo-shape marker paired with the command that verifies that
-// shape, plus the places the command commonly lives when it is installed but not
-// on PATH.
-type GateTool struct {
-	Marker string
-	Cmd    string
-	Verify string
-	LookIn []string
-}
-
-var gateTools = []GateTool{
-	{Marker: "go.mod", Cmd: "go", Verify: "go build ./... && go test ./...",
-		LookIn: []string{"/usr/local/go/bin", "~/go/bin", "/usr/lib/go/bin", "/opt/homebrew/bin"}},
-	{Marker: "pyproject.toml", Cmd: "pytest", Verify: "pytest -q",
-		LookIn: []string{".venv/bin", "venv/bin", "~/.local/bin"}},
-	{Marker: "setup.py", Cmd: "pytest", Verify: "pytest -q",
-		LookIn: []string{".venv/bin", "venv/bin", "~/.local/bin"}},
-	{Marker: "package.json", Cmd: "npm", Verify: "npm test",
-		LookIn: []string{"/usr/local/bin", "/opt/homebrew/bin"}},
-	{Marker: "Cargo.toml", Cmd: "cargo", Verify: "cargo test",
-		LookIn: []string{"~/.cargo/bin"}},
-}
-
 // checkGateToolchain is #35. The worker inherits its PATH from the process that
 // spawns it, so a toolchain that is installed but not on THIS PATH does not exist
 // as far as the worker is concerned — and a worker that cannot run the repo's
@@ -543,58 +521,38 @@ var gateTools = []GateTool{
 // nothing. The failure mode was not "no toolchain" but "toolchain not visible to
 // the worker", so a rung that only asks "is it installed somewhere?" would have
 // passed and taught us nothing.
+// The table it reads lives in internal/gate, which the worker engine reads too
+// (#59). Two copies of it is how this rung would end up blessing a shape the
+// worker cannot gate.
+//
+// A repo whose shape rig does not recognise SKIPs rather than fails: since #59
+// the engine has a last-resort fallback doctor cannot see from here — the gate
+// command the worker itself runs in the repo — so "no marker" no longer means
+// "no gate", and reporting it as a failure would be a lie.
 func checkGateToolchain(cwd string) rung {
 	const name = "gate toolchain"
-	tool, ok := DetectGateTool(cwd)
+	tool, ok := gate.DetectGateTool(cwd)
 	if !ok {
-		return skip(name, "no recognised project shape here — rig cannot infer the gate command")
+		return skip(name, "no recognised project shape here — rig cannot infer the gate command up front; "+
+			"the engine falls back to whatever gate command the worker runs in the repo")
 	}
-	if p, err := exec.LookPath(tool.Cmd); err == nil {
+	if p, found := tool.Available(cwd, exec.LookPath); found {
 		return pass(name, fmt.Sprintf("%s found at %s (gate: %s)", tool.Cmd, p, tool.Verify))
+	}
+	if tool.InRepo {
+		// A repo-local wrapper that is present but not executable — a real and
+		// silent failure mode of a fresh clone on a filesystem that drops the bit.
+		return fail(name, fmt.Sprintf("%s (%s) declares the gate `%s`, but %s is not an executable file in the repo",
+			tool.Marker, cwd, tool.Verify, tool.Cmd),
+			"chmod +x "+tool.Cmd+" in "+cwd)
 	}
 	detail := fmt.Sprintf("%s (%s) declares a %s project, but `%s` is NOT on the PATH the worker inherits — it cannot run `%s`, so it cannot prove anything it changes",
 		tool.Marker, cwd, tool.Cmd, tool.Cmd, tool.Verify)
-	if found := FindOffPath(tool, cwd); found != "" {
+	if found := gate.FindOffPath(tool, cwd); found != "" {
 		return fail(name, detail+"; it IS installed at "+found,
 			"add "+filepath.Dir(found)+" to PATH in the environment that launches Claude Code (a non-interactive shell does not read your profile)")
 	}
 	return fail(name, detail, "install "+tool.Cmd+" and make sure it is on PATH for the process that launches Claude Code")
-}
-
-// DetectGateTool scans dir for known repo-shape markers (go.mod, pyproject.toml,
-// etc.) and returns the matching tool entry, or (false) when none is found.
-func DetectGateTool(dir string) (GateTool, bool) {
-	for _, t := range gateTools {
-		if _, err := os.Stat(filepath.Join(dir, t.Marker)); err == nil {
-			return t, true
-		}
-	}
-	return GateTool{}, false
-}
-
-// FindOffPath looks for the command in the usual install locations, so the report
-// can name the directory to add instead of telling the user to install something
-// they already have. Relative candidates (a project's .venv/bin) resolve against
-// the REPO, not the process working directory — the worker runs in the repo, and
-// doctor may not.
-func FindOffPath(t GateTool, repo string) string {
-	home, _ := os.UserHomeDir()
-	for _, dir := range t.LookIn {
-		switch {
-		case strings.HasPrefix(dir, "~/"):
-			if home == "" {
-				continue
-			}
-			dir = filepath.Join(home, dir[2:])
-		case !filepath.IsAbs(dir):
-			dir = filepath.Join(repo, dir)
-		}
-		p := filepath.Join(dir, t.Cmd)
-		if st, err := os.Stat(p); err == nil && !st.IsDir() && st.Mode()&0o111 != 0 {
-			return p
-		}
-	}
-	return ""
 }
 
 // --- rung 7: the guards ---------------------------------------------------

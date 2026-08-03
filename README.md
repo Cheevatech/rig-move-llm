@@ -213,10 +213,22 @@ agent's output small, plus `.rig-move-llm/config.env`.
 rung fails: config + `ENABLED`, a **real completion** against the worker endpoint (a probe against
 `/v1/models` answers 200 on some servers even when the API key is wrong, so it cannot see an auth
 failure), the cc engine's endpoint and CLI, Claude Code's workspace trust, whether the force-delegate
-hook **actually denies** a MAIN `Bash` call, whether the repo's gate command (`go`, `pytest`, `npm`,
-`cargo`) is on **the PATH the worker inherits**, and the effective guard ladder. Run it before you
-trust any measurement — a rig that looks configured can still be delegating nothing, and a worker
-that cannot run your tests can only make claims.
+hook **actually denies** a MAIN `Bash` call, whether the repo's gate command is on **the PATH the
+worker inherits**, and the effective guard ladder. Run it before you trust any measurement — a rig
+that looks configured can still be delegating nothing, and a worker that cannot run your tests can
+only make claims.
+
+**What counts as your repo's gate.** rig infers it from the repo's own shape — `go.mod`,
+`Cargo.toml`, `pyproject.toml`, `setup.py`, `mix.exs`, `Package.swift`, `build.zig`, `pom.xml`,
+`build.gradle[.kts]`, `*.sln`/`*.csproj`, `phpunit.xml`, `.rspec`, `package.json`, `deno.json`,
+`Rakefile`, or a `Makefile` that declares a `test:` target. A build-tool wrapper the project ships
+(`./gradlew`, `./mvnw`, `vendor/bin/phpunit`) wins over the same tool on PATH, because that is the
+version the project pins. If your repo matches none of them, the engine falls back to **the gate
+command the worker itself ran in your repo** — rig re-runs it, with `RIG_*` scrubbed, and reads the
+exit code itself, so the verdict is still rig's own measurement and not the worker's word. The
+return says which of the two kinds you got. A command that turns out not to apply (`npm ERR! Missing
+script: test`, `No rule to make target 'test'`) is reported as *no gate ran*, never as a failing
+gate: a wrong verdict is worse than a missing one.
 
 **On / off switch.** `ENABLED` in `config.env` is the master toggle: `false` (the default when you
 skip the worker) means the hook passes every tool through and Claude Code behaves normally; set a

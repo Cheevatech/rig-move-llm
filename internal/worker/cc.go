@@ -369,7 +369,13 @@ func ccProofComplete(absRepo string, p *ccProof) bool {
 // leak into the worker's shell (#10) — a target repo whose tests read RIG_CC_*
 // would fail for reasons unrelated to the change under test. The engine reads
 // its own RIG_CC_* knobs in-process before spawning, so scrubbing costs nothing.
-func ccChildEnv(base string) []string {
+//
+// stampAgentID keeps the legacy RIG_AGENT_ID marker. It is only set when the
+// session-id registration failed: the stamp identifies the worker to the hook,
+// but being an environment variable it reaches every process the worker
+// launches, so the worker's own `go test` inherits a worker identity too (#42).
+// See newWorkerSession for the identity that does not inherit.
+func ccChildEnv(base string, stampAgentID bool) []string {
 	parent := os.Environ()
 	env := make([]string, 0, len(parent)+2)
 	for _, kv := range parent {
@@ -378,18 +384,20 @@ func ccChildEnv(base string) []string {
 		}
 		env = append(env, kv)
 	}
-	return append(env,
+	env = append(env,
 		"ANTHROPIC_BASE_URL="+base,
-		"ANTHROPIC_API_KEY="+ccAPIKey(),
-		// The one RIG_* the child MUST carry (#24). The worker runs as its own
-		// `claude -p` session, so its hook payloads have no agent_id — and with
-		// every RIG_* stripped, the force-delegate hook read it as the paid MAIN
-		// leg and denied its Edit/Write/Bash calls. Measured: a round that burned
-		// the full wall guard with iters=0 and an empty diff, its last_test field
-		// containing rig's own "Main agent is plan/delegate/review only" deny.
-		// The posture applies to MAIN; the worker must be not-MAIN by
-		// construction, and RIG_AGENT_ID is the existing seam that says so.
-		"RIG_AGENT_ID="+ccWorkerAgentID)
+		"ANTHROPIC_API_KEY="+ccAPIKey())
+	if stampAgentID {
+		// The fallback identity (#24). The worker runs as its own `claude -p`
+		// session, so its hook payloads have no agent_id — and with every RIG_*
+		// stripped, the force-delegate hook read it as the paid MAIN leg and denied
+		// its Edit/Write/Bash calls. Measured: a round that burned the full wall
+		// guard with iters=0 and an empty diff, its last_test field containing
+		// rig's own "Main agent is plan/delegate/review only" deny. The posture
+		// applies to MAIN; the worker must be not-MAIN by construction.
+		env = append(env, "RIG_AGENT_ID="+ccWorkerAgentID)
+	}
+	return env
 }
 
 // ccWorkerAgentID identifies the cc worker subprocess to rig's hooks. Any
@@ -421,6 +429,18 @@ func (e *Engine) runCCOnce(ctx context.Context, bin, base, absRepo, user string,
 		args = append(args, "--disallowedTools", deny)
 	}
 	args = append(args, "--append-system-prompt", ccSystemPrompt)
+
+	// Identity (#42): a registered session id tells the hook this subprocess is
+	// the worker, and unlike RIG_AGENT_ID it does not travel to the processes the
+	// worker launches. If registration fails we fall back to the env stamp rather
+	// than spawn a worker that will be denied every tool (#24).
+	ws, registered := e.newWorkerSession()
+	if registered {
+		args = append(args, "--session-id", ws.id)
+		defer ws.close()
+	} else {
+		logStderr("cc: worker-session registration failed; falling back to the RIG_AGENT_ID stamp (#42 leak stays)")
+	}
 
 	// `claude -p` does not echo its prompt into the stream (measured: D4
 	// ADDENDUM), so the harness archives what was actually fired. The proof
@@ -454,7 +474,7 @@ func (e *Engine) runCCOnce(ctx context.Context, bin, base, absRepo, user string,
 	// OAuth/keychain credentials entirely (auth hygiene — the worker leg must not
 	// ride the subscription identity), and it satisfies CC's headless auth check.
 	// The local endpoint does not validate it (proven by the smoke shot).
-	cmd.Env = ccChildEnv(base)
+	cmd.Env = ccChildEnv(base, !registered)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {

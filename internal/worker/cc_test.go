@@ -151,11 +151,12 @@ func TestCCChildEnvScrubsRigConfig(t *testing.T) {
 	t.Setenv("RIG_WORKER_ENGINE", "cc")
 	t.Setenv("CC_KEEP_ME", "1")
 
-	env := ccChildEnv("http://worker-leg")
+	env := ccChildEnv("http://worker-leg", true)
 	for _, kv := range env {
 		// RIG_AGENT_ID is the deliberate exception (#24): it is rig's identity
 		// stamp for the child, not rig config, and without it the hook mistakes
-		// the worker for the paid MAIN leg and denies its tools.
+		// the worker for the paid MAIN leg and denies its tools. It is only used
+		// when the session-id registration failed (#42).
 		if strings.HasPrefix(kv, "RIG_") && !strings.HasPrefix(kv, "RIG_AGENT_ID=") {
 			t.Errorf("RIG_ config leaked into child env: %s", kv)
 		}
@@ -182,14 +183,22 @@ func TestCCSubprocessSeesNoRigEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 	bin := filepath.Join(t.TempDir(), "fake-claude")
+	// The fake also records the identity it was launched with, and checks the
+	// registry WHILE it runs — the engine unregisters the session when the round
+	// ends, so a check after Implement returns would prove nothing.
+	stateDir := t.TempDir()
 	script := "#!/bin/bash\n" +
 		"env > '" + outDir + "/env-full.txt'\n" +
+		"printf '%s\\n' \"$@\" > '" + outDir + "/args.txt'\n" +
+		"prev=; for a in \"$@\"; do if [ \"$prev\" = --session-id ]; then echo \"$a\" > '" + outDir + "/sid.txt'; " +
+		"[ -f '" + stateDir + "/worker_sessions/'\"$a\" ] && echo registered > '" + outDir + "/registered.txt'; fi; prev=$a; done\n" +
 		"cat '" + streamFile + "'\n"
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	ccEnv(t, bin)
 	t.Setenv("RIG_CC_MODEL", "haiku")
+	t.Setenv("RIG_STATE_DIR", stateDir)
 
 	e := NewEngine(config.Config{})
 	if res := e.Implement(context.Background(), repo, "fix the bug", ""); res.Err != "" {
@@ -201,13 +210,20 @@ func TestCCSubprocessSeesNoRigEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, line := range strings.Split(string(envFull), "\n") {
-		if strings.HasPrefix(line, "RIG_") && !strings.HasPrefix(line, "RIG_AGENT_ID=") {
+		if strings.HasPrefix(line, "RIG_") {
 			t.Errorf("subprocess saw rig config: %s", line)
 		}
 	}
-	// ...and it MUST carry the identity stamp, or the hook denies its tools (#24).
-	if !strings.Contains(string(envFull), "RIG_AGENT_ID="+ccWorkerAgentID) {
-		t.Errorf("subprocess is not stamped as the worker:\n%s", envFull)
+	// ...and it MUST still be identifiable as the worker, or the hook denies its
+	// tools (#24) — now through a registered session id, which (unlike the old
+	// RIG_AGENT_ID stamp) the worker's own child processes do not inherit (#42).
+	sid, err := os.ReadFile(filepath.Join(outDir, "sid.txt"))
+	if err != nil {
+		args, _ := os.ReadFile(filepath.Join(outDir, "args.txt"))
+		t.Fatalf("subprocess was launched without --session-id, so the hook reads it as MAIN:\n%s", args)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "registered.txt")); err != nil {
+		t.Errorf("session %s was not registered where the hook looks — the worker would be denied every tool", strings.TrimSpace(string(sid)))
 	}
 	if !strings.Contains(string(envFull), "ANTHROPIC_BASE_URL=http://127.0.0.1:9/worker-leg") {
 		t.Errorf("subprocess missing worker-leg base URL:\n%s", envFull)

@@ -387,9 +387,13 @@ func (e *Engine) runCCOnce(ctx context.Context, bin, base, absRepo, user string,
 	// the tracker.
 	act := newCCActivity()
 	stopWatchdog := e.watchStall(cmd, act)
+	// The wall is the engine's own watchdog now (#57), not the ctx deadline: only
+	// this layer can see the gate spans it must not count.
+	stopWall := e.watchWall(cmd, act)
 
 	sawResult, jsonLines, totalLines := e.parseCCStream(stdout, mirror, res, proof, act)
 	stopWatchdog()
+	stopWall()
 	werr := cmd.Wait()
 
 	// A killed round reports WHY it died and what it was last seen doing, so MAIN
@@ -445,14 +449,20 @@ func ccStallTimeout() time.Duration {
 	return time.Duration(envInt("RIG_CC_STALL_TIMEOUT", 600)) * time.Second
 }
 
-// StallGuard and WallGuard expose the two engine guards for reporting (doctor's
+// StallGuard and WallGuard expose the engine guards for reporting (doctor's
 // guard rung). They are accessors, not knobs: the values still come from the same
 // env overrides the engine itself reads, so what doctor prints is what a round
 // will actually get.
 func StallGuard() time.Duration { return ccStallTimeout() }
 
-// WallGuard is the engine's own end-to-end bound on one implement call.
+// WallGuard is the engine's bound on the WORKING time of one implement call —
+// wall clock minus the time the worker spent waiting on its gate (#57). See
+// GateCredit for how much of that time may be discounted, and WallCeiling for
+// the absolute bound that holds regardless.
 func WallGuard() time.Duration { return runTimeout() }
+
+// GateCredit is how much gate time the wall guard will excuse.
+func GateCredit() time.Duration { return gateCredit() }
 
 // ccStallCheckInterval is how often the watchdog samples the tracker. It only
 // bounds the overshoot of the kill, not the guard itself, so it stays coarse for
@@ -474,11 +484,76 @@ type ccActivity struct {
 	last    string
 	lines   int
 	stalled bool
+	walled  bool
+
+	// Gate accounting (#57). inGate holds the tool_use ids of gate commands the
+	// worker has started and not yet got a result for — a set, because a CC turn
+	// may issue several tool calls at once. gateSince is when the set last became
+	// non-empty; gateTotal is the closed spans. The wall guard subtracts both.
+	inGate    map[string]bool
+	gateSince time.Time
+	gateTotal time.Duration
 }
 
 func newCCActivity() *ccActivity {
 	now := time.Now()
-	return &ccActivity{started: now, at: now}
+	return &ccActivity{started: now, at: now, inGate: map[string]bool{}}
+}
+
+// gateBegin records that the worker has just launched a gate command. Only the
+// FIRST concurrent gate opens the span: overlapping gates are wall-clock, not
+// CPU, so their time must be credited once, not once per command.
+func (a *ccActivity) gateBegin(id string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.inGate == nil {
+		a.inGate = map[string]bool{}
+	}
+	if len(a.inGate) == 0 {
+		a.gateSince = time.Now()
+	}
+	a.inGate[id] = true
+}
+
+// gateEnd closes one gate command's tool call. The span closes only when the
+// last outstanding gate returns.
+func (a *ccActivity) gateEnd(id string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.inGate[id] {
+		return
+	}
+	delete(a.inGate, id)
+	if len(a.inGate) == 0 && !a.gateSince.IsZero() {
+		a.gateTotal += time.Since(a.gateSince)
+		a.gateSince = time.Time{}
+	}
+}
+
+// gateTime is the total time this round spent inside gate commands, INCLUDING a
+// span still open right now — which is what makes the wall guard unable to fire
+// mid-gate: while the gate runs, gateTime grows exactly as fast as elapsed, so
+// working() stands still.
+func (a *ccActivity) gateTime() time.Duration {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	total := a.gateTotal
+	if len(a.inGate) > 0 && !a.gateSince.IsZero() {
+		total += time.Since(a.gateSince)
+	}
+	return total
+}
+
+// working is the elapsed time the wall guard actually budgets: everything except
+// gate time, and at most credit seconds of gate time may be excused. Past that
+// the credit is exhausted and gate time counts like any other second — the
+// ceiling in mcp.go is the same bound expressed as an absolute deadline.
+func (a *ccActivity) working(credit time.Duration) time.Duration {
+	excused := a.gateTime()
+	if excused > credit {
+		excused = credit
+	}
+	return a.elapsed() - excused
 }
 
 // touch records one line of stream activity. desc, when non-empty, replaces the
@@ -515,6 +590,18 @@ func (a *ccActivity) isStalled() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.stalled
+}
+
+func (a *ccActivity) markWalled() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.walled = true
+}
+
+func (a *ccActivity) isWalled() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.walled
 }
 
 // lastSeen is the diagnosis line: what the worker was last observed doing, and
@@ -564,6 +651,46 @@ func (e *Engine) watchStall(cmd *exec.Cmd, act *ccActivity) (stop func()) {
 	return func() { close(done) }
 }
 
+// watchWall starts the wall watchdog and returns the function that stops it.
+//
+// It exists because the wall used to be the caller's context deadline, and a
+// context deadline cannot tell the difference between a worker that is stuck and
+// a worker that is waiting on its own test suite (#57). This watchdog can: it
+// reads the gate spans the stream parser records, budgets only the time spent
+// OUTSIDE them, and so cannot fire while a gate is running — the round that was
+// killed mid `node --test`, losing work that was already on disk, now gets to
+// see its gate finish. The ctx deadline is still there, one credit above, as the
+// backstop for a worker that never leaves its gate at all.
+func (e *Engine) watchWall(cmd *exec.Cmd, act *ccActivity) (stop func()) {
+	limit := runTimeout()
+	if limit <= 0 {
+		return func() {}
+	}
+	credit := gateCredit()
+	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(ccStallCheckInterval(limit))
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				if act.working(credit) < limit {
+					continue
+				}
+				act.markWalled()
+				logStderr("cc: wall guard fired — %s working time (limit %s), %s elapsed, %s credited to the gate (last: %s)",
+					act.working(credit).Round(time.Second), limit,
+					act.elapsed().Round(time.Second), act.gateTime().Round(time.Second), act.lastSeen())
+				_ = killProcGroup(cmd)
+				return
+			}
+		}
+	}()
+	return func() { close(done) }
+}
+
 // ccTimeoutDiagnosis turns a round that died on one of the two guards into the
 // message MAIN reads. It returns ("", "") when neither guard fired, leaving the
 // existing version-skew diagnostics to explain the missing result event.
@@ -576,13 +703,24 @@ func ccTimeoutDiagnosis(ctx context.Context, act *ccActivity) (msg, stopped stri
 				"Do NOT simply re-delegate the same task: a stall repeats. Report this to the human, "+
 				"or delegate a SMALLER, more concrete slice of the task.",
 			ccStallTimeout(), ccStallTimeout(), act.elapsed().Round(time.Second), act.lastSeen()), "timeout"
-	case ctx.Err() != nil:
+	case act.isWalled():
 		return fmt.Sprintf(
-			"cc: worker killed by the engine wall guard after %s (RIG_WORKER_RUN_TIMEOUT). "+
+			"cc: worker killed by the engine wall guard — %s of working time (limit %s, RIG_WORKER_RUN_TIMEOUT) "+
+				"out of %s elapsed, with %s credited to gate runs and not counted. "+
 				"Last seen: %s. Any diff below is the partial work it had already written. "+
 				"Do NOT simply re-delegate the same task: it will hit the same wall. Report this to the "+
 				"human, or delegate a SMALLER, more concrete slice of the task.",
-			act.elapsed().Round(time.Second), act.lastSeen()), "timeout"
+			act.working(gateCredit()).Round(time.Second), runTimeout(),
+			act.elapsed().Round(time.Second), act.gateTime().Round(time.Second), act.lastSeen()), "timeout"
+	case ctx.Err() != nil:
+		return fmt.Sprintf(
+			"cc: worker killed by the engine wall ceiling after %s (RIG_WORKER_RUN_TIMEOUT + RIG_WORKER_GATE_CREDIT = %s) — "+
+				"it spent %s of that inside gate runs, which is more gate time than the wall guard can excuse. "+
+				"Last seen: %s. Any diff below is the partial work it had already written. "+
+				"Do NOT simply re-delegate the same task: it will hit the same wall. Report this to the "+
+				"human, or delegate a SMALLER, more concrete slice of the task.",
+			act.elapsed().Round(time.Second), WallCeiling(),
+			act.gateTime().Round(time.Second), act.lastSeen()), "timeout"
 	}
 	return "", ""
 }
@@ -671,6 +809,13 @@ func (e *Engine) parseCCStream(r interface{ Read([]byte) (int, error) }, mirror 
 					_ = json.Unmarshal(b.Input, &in)
 					if c := strings.TrimSpace(in.Command); c != "" {
 						bashCmd[b.ID] = c
+						// The gate span opens here, at the tool_use, because that
+						// is the moment the subprocess starts; it closes on the
+						// matching tool_result below. The wall guard reads the
+						// span so a slow test suite is not charged as idling (#57).
+						if act != nil && ccIsGateCommand(c) {
+							act.gateBegin(b.ID)
+						}
 					}
 				}
 			}
@@ -678,6 +823,9 @@ func (e *Engine) parseCCStream(r interface{ Read([]byte) (int, error) }, mirror 
 			for _, b := range ccContentBlocks(ev.Message.Content) {
 				if b.Type != "tool_result" {
 					continue
+				}
+				if act != nil {
+					act.gateEnd(b.ToolUseID)
 				}
 				cmd, ok := bashCmd[b.ToolUseID]
 				if ok && proof != nil {

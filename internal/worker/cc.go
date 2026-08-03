@@ -164,6 +164,9 @@ func (e *Engine) implementCC(ctx context.Context, absRepo, task, gateDir string)
 	// same command) — evidence never pairs across sessions, so a stale red from
 	// an earlier spawn cannot legitimize a later lone green.
 	proof := &ccProof{}
+	// stashTag is set only if the proof retry runs; "" means this round never
+	// asked the worker to stash anything, so there is nothing to check for.
+	stashTag := ""
 	sawResult := e.runCCOnce(ctx, bin, base, absRepo, user, &res, proof, true)
 
 	// V6 proof-of-flip: when the worker claims done without red->green evidence,
@@ -173,7 +176,11 @@ func (e *Engine) implementCC(ctx context.Context, absRepo, task, gateDir string)
 		logStderr("cc: done without proof-of-flip — one worker-side retry")
 		var res2 Result
 		retryProof := &ccProof{}
-		if e.runCCOnce(ctx, bin, base, absRepo, user+"\n\n"+ccProofRetryInstrFor(ccStashTag()), &res2, retryProof, false) {
+		// The tag is kept, not discarded: it is the engine's only handle on the
+		// stash the retry is about to create, and therefore the only way to check
+		// afterwards that the work actually came back out of it (#54).
+		stashTag = ccStashTag()
+		if e.runCCOnce(ctx, bin, base, absRepo, user+"\n\n"+ccProofRetryInstrFor(stashTag), &res2, retryProof, false) {
 			res.Iterations += res2.Iterations
 			res.InputTokens += res2.InputTokens
 			res.OutputTokens += res2.OutputTokens
@@ -196,6 +203,11 @@ func (e *Engine) implementCC(ctx context.Context, absRepo, task, gateDir string)
 	// A leftover proof test is worker garbage either way — it must never leak
 	// into the tree a later run (or the user) sees.
 	removeProofArtifacts(absRepo)
+
+	// The retry told the worker to stash its work and pop it back. Whether the
+	// pop succeeded is a fact about the tree, so the engine reads it off the
+	// tree instead of believing the summary (#54).
+	noteLeftoverStash(ctx, e, absRepo, stashTag, &res)
 
 	res.Diff, res.FilesChanged = e.collectDiff(ctx, absRepo)
 
@@ -284,6 +296,61 @@ func removeProofArtifacts(absRepo string) {
 			os.Remove(dir)
 		}
 	}
+}
+
+// noteLeftoverStash reports a stash this round created and did not get back.
+//
+// Measured 2026-08-03, probing the last open branch of #54 with the real retry
+// instruction against the real worker endpoint. The retry's step 4 says, in
+// plain words: if the pop reports a conflict, STOP, do not resolve it, name the
+// file. The worker did the opposite. Its pop failed with
+//
+//	rig_proof_test.py already exists, no checkout
+//	error: could not restore untracked files from stash
+//
+// so it ran `rm rig_proof_test.py && git stash pop ...` — resolving the conflict
+// itself, exactly what it was told not to do — which failed too, and then it
+// answered "restored the fix via git stash pop ... the proof-of-flip is
+// complete" with the entry still sitting on the stack. That leftover is the same
+// residue the M1 volley found in the commander clone; this is its mechanism.
+//
+// The lesson is the one map9 D3 already paid for: prose can be ignored, and a
+// summary is not evidence. So the engine reads the fact off the tree. It does
+// NOT drop the entry — a stash holds work, and silently discarding it to tidy up
+// would be a worse failure than the one being reported. It names it and says how
+// to look, which is what a human needs to decide.
+//
+// Only THIS round's tag is checked. Entries left by earlier sessions are not
+// this round's to claim or judge (#54's original lesson).
+func noteLeftoverStash(ctx context.Context, e *Engine, repo, tag string, res *Result) {
+	if tag == "" {
+		return
+	}
+	label := ccStashLabel(tag)
+	ctx, cancel := diffCtx(ctx)
+	defer cancel()
+	var entry, ref string
+	for _, l := range strings.Split(gitOut(ctx, repo, "stash", "list"), "\n") {
+		if !strings.Contains(l, label) {
+			continue
+		}
+		entry = strings.TrimSpace(l)
+		// `git stash list` prints "stash@{0}: On master: rig-fix-abc". Only the
+		// part before the first colon is a ref the user can hand back to git;
+		// quoting the whole line into a command would hand them one that fails.
+		ref, _, _ = strings.Cut(entry, ":")
+		break
+	}
+	if entry == "" {
+		return
+	}
+	logStderr("cc: proof retry left its own stash behind: %s", entry)
+	res.StashLeftBehind = entry
+	res.Summary += "\n\nSTASH LEFT BEHIND: this round pushed " + label + " and did not get it back — " +
+		"`" + entry + "` is still on the stack, so its `git stash pop` did not fully succeed however the " +
+		"summary above reads. The working tree may be missing part of the round's work, and the entry will " +
+		"be in the user's way. Inspect it with `git stash show -p " + ref + "` and decide; rig will not " +
+		"drop a stash on its own."
 }
 
 // ccProofComplete is the pass condition frozen in V6: a red->green flip seen in

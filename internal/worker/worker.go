@@ -86,6 +86,12 @@ type Result struct {
 	// EngineGateOutput is the stdout+stderr that command produced.
 	EngineGateCmd    string `json:"engine_gate_cmd,omitempty"`
 	EngineGateOutput string `json:"engine_gate_output,omitempty"`
+	// StashLeftBehind names a stash entry this round created and failed to
+	// restore. It is empty on every round that did not stash, and on every round
+	// whose pop worked. A non-empty value means the tree is not what the summary
+	// says it is (#54).
+	StashLeftBehind string `json:"stash_left_behind,omitempty"`
+
 	// WorkerVerdict is "pass"|"fail"|"unknown" — what the worker's own last_test
 	// field claims. It is a claim, never a measurement; it stays in its own field
 	// so a caller can never mistake it for GateVerdict, which is always the

@@ -977,7 +977,7 @@ func runRepoGate(repo, workerGateCmd string) gateOutcome {
 			return gateOutcome{NotRunReason: fmt.Sprintf("toolchain %s not on PATH", tool.Cmd)}
 		}
 		verify = tool.Verify
-	} else if c := strings.TrimSpace(workerGateCmd); c != "" && ccIsGateCommand(c) {
+	} else if c := workerFallbackGate(workerGateCmd); c != "" {
 		verify, source = c, "worker-observed"
 	} else {
 		return gateOutcome{NotRunReason: "no recognised repo shape, and the worker ran no gate command of its own to fall back on"}
@@ -1014,6 +1014,24 @@ func runRepoGate(repo, workerGateCmd string) gateOutcome {
 	return gateOutcome{Ran: true, Verdict: "pass", Cmd: verify, Output: output, Source: source}
 }
 
+// workerFallbackGate decides whether the worker's own gate command may stand in
+// for a repo shape rig does not recognise, and returns it if so.
+//
+// Two things disqualify a command. An inspection command (`git diff`) verifies
+// nothing, so re-running it would manufacture a green verdict out of a command
+// that ran no code. And a command naming the proof test is disqualified for a
+// reason specific to this engine: implementCC DELETES rig_proof_test.py before
+// the gate runs, so re-running `pytest rig_proof_test.py` cannot do anything but
+// fail — it would report a false fail on every round whose last gate happened to
+// be the proof run, and blame the change for a file rig itself removed.
+func workerFallbackGate(cmd string) string {
+	c := strings.TrimSpace(cmd)
+	if c == "" || !ccIsGateCommand(c) || strings.Contains(c, ccProofFile) {
+		return ""
+	}
+	return c
+}
+
 // gateInapplicableMarkers are the unmistakable ways a build tool says "you asked
 // me to run something I do not have", as opposed to "your tests failed". Each one
 // is a message the tool emits INSTEAD of running anything, so misreading it as a
@@ -1027,6 +1045,8 @@ var gateInapplicableMarkers = []struct{ needle, why string }{
 	{"no rule to make target 'test'", "the Makefile declares no test target"},
 	{"no rule to make target `test'", "the Makefile declares no test target"},
 	{"no such command", "the subcommand does not exist for this toolchain"},
+	{"file or directory not found", "the gate command names a path that is not in the tree"},
+	{"no tests ran", "the toolchain found no tests to run"},
 	{"command not found", "the gate command is not installed"},
 	{"is not recognized as an internal or external command", "the gate command is not installed"},
 	{"could not find or load main class", "the build tool is not configured in this repo"},

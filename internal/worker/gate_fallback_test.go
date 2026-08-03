@@ -91,6 +91,18 @@ func TestRunRepoGateFallsBackToTheWorkersGateCommand(t *testing.T) {
 		}
 	})
 
+	t.Run("the proof test is never the fallback gate", func(t *testing.T) {
+		repo := t.TempDir()
+		// implementCC deletes rig_proof_test.py before the gate runs, so
+		// re-running the worker's proof command cannot do anything but fail —
+		// it would report a false fail on every round whose last gate happened
+		// to be the proof run, blaming the change for a file rig itself removed.
+		o := runRepoGate(repo, "python -m pytest -q "+ccProofFile)
+		if o.Ran {
+			t.Errorf("re-ran the proof test as the gate and reported %q", o.Verdict)
+		}
+	})
+
 	t.Run("no shape and no worker command is still an honest nothing", func(t *testing.T) {
 		if o := runRepoGate(t.TempDir(), ""); o.Ran {
 			t.Errorf("invented a gate and reported %q", o.Verdict)

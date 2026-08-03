@@ -116,9 +116,22 @@ func TestEngineGateUnrecognizedShape(t *testing.T) {
 	}
 }
 
-// TestEngineGateNormalRoundUnchanged verifies that a normal (non-killed) round
-// is unaffected — no engine-run marker, GateSource stays empty.
-func TestEngineGateNormalRoundUnchanged(t *testing.T) {
+// TestEngineGateNormalRoundKeepsTheWorkersClaimSeparate.
+//
+// This test used to assert that a normal round leaves GateSource empty. That
+// premise died at #46, which gates EVERY round with a diff — it only kept
+// passing because ccTestRepo has no recognisable shape, so no gate could run.
+// #59 gave that repo a gate (the worker's own command), which is what made the
+// stale premise visible: it failed on Linux CI, where `python` exists, and
+// passed on macOS only because `python` does not and the run was classified as
+// the gate being inapplicable. A test that passes for a reason unrelated to what
+// it claims is worse than no test.
+//
+// What it was really protecting, and still does: the engine's own measurement
+// must never masquerade as the worker's claim. LastTest is what the WORKER
+// demonstrated; the engine's number lives in its own fields. A caller that
+// cannot tell the two apart cannot detect the round where they disagree.
+func TestEngineGateNormalRoundKeepsTheWorkersClaimSeparate(t *testing.T) {
 	repo := ccTestRepo(t)
 	bin, _ := ccFakeBin(t, t.TempDir(), ccHappyStream)
 	ccEnv(t, bin)
@@ -129,14 +142,49 @@ func TestEngineGateNormalRoundUnchanged(t *testing.T) {
 	if res.Stopped != "done" {
 		t.Fatalf("stopped=%q, want done", res.Stopped)
 	}
-	if res.GateSource != "" {
-		t.Errorf("gate_source = %q, want empty for normal round", res.GateSource)
-	}
-	if res.GateVerdict != "" {
-		t.Errorf("gate_verdict = %q, want empty for normal round", res.GateVerdict)
-	}
 	if strings.Contains(res.LastTest, "ENGINE-RUN") {
-		t.Errorf("last_test should not contain engine marker on normal round: %q", res.LastTest)
+		t.Errorf("last_test carries the engine marker on a normal round: %q", res.LastTest)
+	}
+	// The worker's claim is its own last gate output, untouched by the engine.
+	if !strings.Contains(res.LastTest, "1 passed") {
+		t.Errorf("last_test should hold the worker's own gate output, got %q", res.LastTest)
+	}
+	if res.WorkerVerdict != "pass" {
+		t.Errorf("worker_verdict = %q, want the worker's own claim", res.WorkerVerdict)
+	}
+	// Whatever the engine measured, it is reported as the engine's, separately.
+	if res.GateSource != "" && res.GateSource != "engine" {
+		t.Errorf("gate_source = %q, want empty or engine", res.GateSource)
+	}
+	if res.GateVerdict != "" && res.EngineGateCmd == "" {
+		t.Error("a verdict with no command behind it is not a measurement")
+	}
+}
+
+// The engine must not invent a gate. With no repo shape AND no gate command from
+// the worker, the honest answer is that nothing verified this round — #59's
+// fallback widens where a gate comes from, it does not lower the bar for
+// claiming one ran.
+func TestEngineGateInventsNothingWithoutAGate(t *testing.T) {
+	repo := ccTestRepo(t) // no marker of any kind
+	// A worker that only ever inspected: `git diff` runs no code, so there is
+	// nothing here that could stand in for a gate.
+	stream := `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"git diff"}}]}}` + "\n" +
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"diff --git a/file.txt"}]}}` + "\n" +
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"w1","name":"Write","input":{"file_path":"file.txt"}}]}}` + "\n" +
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"w1","content":"ok"}]}}` + "\n" +
+		`{"type":"result","subtype":"success","result":"changed it","num_turns":2,"usage":{"input_tokens":1,"output_tokens":1}}` + "\n"
+	bin, _ := ccFakeBin(t, t.TempDir(), stream)
+	ccEnv(t, bin)
+
+	e := NewEngine(config.Config{})
+	res := e.Implement(context.Background(), repo, "fix the bug", "")
+
+	if res.GateVerdict != "" {
+		t.Errorf("gate_verdict = %q — the engine invented a verdict with no gate to run", res.GateVerdict)
+	}
+	if !strings.Contains(res.Err, "no recognised repo shape") {
+		t.Errorf("the absence of a gate must be stated, got err=%q", res.Err)
 	}
 }
 

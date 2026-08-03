@@ -144,6 +144,12 @@ const drillTool = "show_change"
 // never shows up in the diff it describes.
 const testLogName = ".rig-move-llm/last_test.log"
 
+// engineGateLogName is where the ENGINE-run gate's log is parked. It is a
+// separate file from testLogName because the two logs are two different facts —
+// what the worker demonstrated, and what rig measured itself — and a round where
+// they disagree is exactly the round where both must survive to be read.
+const engineGateLogName = ".rig-move-llm/last_engine_gate.log"
+
 // DrillRef is a ready-to-call drill invocation. Its presence is what makes a
 // tiered return lossless in the only sense R9 claims: the raw substrate is still
 // reachable, it just isn't resident.
@@ -218,8 +224,13 @@ type TieredResult struct {
 	GateSource                string      `json:"gate_source,omitempty"`
 	GateVerdict               string      `json:"gate_verdict,omitempty"`
 	EngineGateCmd             string      `json:"engine_gate_cmd,omitempty"`
-	EngineGateOutput          string      `json:"engine_gate_output,omitempty"`
-	WorkerVerdict             string      `json:"worker_verdict,omitempty"`
+	// EngineVerify is the ENGINE-run gate's log, tiered exactly like Verify.
+	// Publishing the raw log here instead would defeat the whole gate: it is a
+	// full test log, it is re-cached on every later MAIN turn, and it arrived
+	// after this contract was written (#41) so nothing was tiering it. #59 made
+	// that visible by making the engine gate run on far more repos.
+	EngineVerify  *VerifyTier `json:"engine_verify,omitempty"`
+	WorkerVerdict string      `json:"worker_verdict,omitempty"`
 }
 
 // drillGuidance tells MAIN what the manifest is and what to do with it: review
@@ -260,11 +271,13 @@ func TierResult(res Result, repo string, thresholdTokens int) TieredResult {
 		GateSource:                res.GateSource,
 		GateVerdict:               res.GateVerdict,
 		EngineGateCmd:             res.EngineGateCmd,
-		EngineGateOutput:          res.EngineGateOutput,
 		WorkerVerdict:             res.WorkerVerdict,
 	}
 	out.Repo = repo
 	out.Verify = tierVerify(res.LastTest, res.LastTestCmd, repo)
+	if strings.TrimSpace(res.EngineGateOutput) != "" {
+		out.EngineVerify = tierVerifyLog(res.EngineGateOutput, res.EngineGateCmd, repo, engineGateLogName)
+	}
 
 	if thresholdTokens <= 0 || out.DiffTokens < thresholdTokens {
 		out.Tier = "full"
@@ -398,6 +411,12 @@ func symbolIntents(summary string) map[string]string {
 // the rest stays fetchable. Green is one line; red keeps the failing test ids and
 // the assertion text, which is what tells MAIN whether the fix is real.
 func tierVerify(log, cmd, repo string) *VerifyTier {
+	return tierVerifyLog(log, cmd, repo, testLogName)
+}
+
+// tierVerifyLog is tierVerify with the park destination named, so the worker's
+// gate log and the engine's own gate log do not overwrite each other.
+func tierVerifyLog(log, cmd, repo, parkAs string) *VerifyTier {
 	if strings.TrimSpace(log) == "" {
 		return &VerifyTier{
 			Status:  "missing",
@@ -424,7 +443,7 @@ func tierVerify(log, cmd, repo string) *VerifyTier {
 
 	// The raw log is not in git, so parking it is what lets one drill contract
 	// serve both a code hunk and the log behind a verify summary.
-	if rel, n, err := parkTestLog(repo, log); err == nil {
+	if rel, n, err := parkTestLog(repo, parkAs, log); err == nil {
 		v.Drill = &DrillRef{Tool: drillTool, Repo: repo, File: rel, StartLine: 1, EndLine: n, Kind: "test_log"}
 	}
 	return v
@@ -475,8 +494,8 @@ func verifySummaryLine(lines []string, status string) string {
 
 // parkTestLog writes the raw log inside repo and returns its repo-relative path
 // plus its line count, which are exactly the drill arguments for it.
-func parkTestLog(repo, log string) (string, int, error) {
-	abs, err := safeJoin(repo, testLogName)
+func parkTestLog(repo, name, log string) (string, int, error) {
+	abs, err := safeJoin(repo, name)
 	if err != nil {
 		return "", 0, err
 	}
@@ -486,7 +505,7 @@ func parkTestLog(repo, log string) (string, int, error) {
 	if err := os.WriteFile(abs, []byte(log), 0o644); err != nil {
 		return "", 0, err
 	}
-	return testLogName, strings.Count(log, "\n") + 1, nil
+	return name, strings.Count(log, "\n") + 1, nil
 }
 
 func capBytes(s string, n int) string {

@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -194,7 +195,7 @@ func (e *Engine) implementCC(ctx context.Context, absRepo, task, gateDir string)
 	}
 	// A leftover proof test is worker garbage either way — it must never leak
 	// into the tree a later run (or the user) sees.
-	os.Remove(absRepo + string(os.PathSeparator) + ccProofFile)
+	removeProofArtifacts(absRepo)
 
 	res.Diff, res.FilesChanged = e.collectDiff(ctx, absRepo)
 
@@ -254,6 +255,35 @@ func applyEngineGate(res *Result, repo string) {
 		res.Err += "\nengine gate not run: " + o.NotRunReason
 	}
 	res.Summary += engineGateNote(o, res.WorkerVerdict)
+}
+
+// removeProofArtifacts deletes the proof test AND what running it left behind.
+//
+// Deleting only the .py was half a cleanup: CPython caches the module as
+// __pycache__/rig_proof_test.cpython-3XX.pyc, so a repo that had no __pycache__
+// (or no entry for this file) came back with rig's own bytecode in the diff the
+// caller reviews. It never failed a gate, which is precisely why it survived —
+// the diff is what a human reads to decide whether to trust the round, and
+// garbage in it costs attention every time.
+//
+// The pattern is anchored to the proof file's own stem, so a repo's real
+// bytecode cache is not touched.
+func removeProofArtifacts(absRepo string) {
+	os.Remove(filepath.Join(absRepo, ccProofFile))
+	stem := strings.TrimSuffix(ccProofFile, ".py")
+	hits, err := filepath.Glob(filepath.Join(absRepo, "__pycache__", stem+".*.pyc"))
+	if err != nil {
+		return
+	}
+	for _, h := range hits {
+		os.Remove(h)
+	}
+	// An empty __pycache__ is one rig created for this file alone.
+	if dir := filepath.Join(absRepo, "__pycache__"); len(hits) > 0 {
+		if entries, derr := os.ReadDir(dir); derr == nil && len(entries) == 0 {
+			os.Remove(dir)
+		}
+	}
 }
 
 // ccProofComplete is the pass condition frozen in V6: a red->green flip seen in

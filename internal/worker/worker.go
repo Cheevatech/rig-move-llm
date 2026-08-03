@@ -91,6 +91,12 @@ type Result struct {
 	// whose pop worked. A non-empty value means the tree is not what the summary
 	// says it is (#54).
 	StashLeftBehind string `json:"stash_left_behind,omitempty"`
+	// ConflictMarkers names the files whose ADDED lines in this round's diff
+	// carry git conflict markers. Non-empty means the round returned a broken
+	// tree — it resolved (or failed to resolve) a conflict by hand instead of
+	// stopping as instructed, and no summary above it can be trusted about the
+	// tree's state.
+	ConflictMarkers []string `json:"conflict_markers,omitempty"`
 
 	// WorkerVerdict is "pass"|"fail"|"unknown" — what the worker's own last_test
 	// field claims. It is a claim, never a measurement; it stays in its own field

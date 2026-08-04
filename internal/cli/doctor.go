@@ -129,6 +129,7 @@ func cmdDoctor(args []string) int {
 		checkWorkerEndpoint(cfg),
 		checkSwitch(cfg),
 		checkWorkspaceTrust(cwd),
+		checkWorkerCommand(),
 		checkGuards(),
 		checkMainAuth(),
 	}
@@ -318,7 +319,76 @@ func getSettingsPaths(repo, home string) []string {
 	return paths
 }
 
-// --- rung 5: the guards ---------------------------------------------------
+// --- rung 5: the command the MCP entry names is resolvable ----------------
+
+// checkWorkerCommand asks whether the thing rig told Claude Code to launch can
+// actually be launched. The MCP entry names `rig-move-llm` (or npx), and Claude
+// Code resolves it from the PATH of whatever started it — so an install can be
+// complete in every visible way and still never start a worker.
+//
+// Measured 2026-08-04 on a real machine: `init --global` wrote a correct
+// registration, and the session reported `worker: failed` with no
+// mcp__worker__implement anywhere, because the binary had never been put on
+// PATH. Nothing said so. The old ladder had a rung for exactly this shape, aimed
+// at the hook command; S4 deleted it along with the hooks instead of repointing
+// it at the command that survived, so this rung is that one, restored to the
+// surface rig actually has.
+func checkWorkerCommand() rung {
+	const name = "worker command"
+	cmd, source := workerMCPCommand()
+	if cmd == "" {
+		return skip(name, "no MCP registration found — run `rig-move-llm init`")
+	}
+	if cmd == "npx" {
+		// npx resolves the package at spawn time; the only thing to check here is
+		// that npx itself exists.
+		if p, err := exec.LookPath("npx"); err == nil {
+			return pass(name, "npx found at "+p+" (worker spawned via npx, from "+source+")")
+		}
+		return fail(name, "the registration in "+source+" spawns the worker with npx, and npx is not on PATH",
+			"install Node, or re-run `rig-move-llm init` without --npx after installing the binary globally")
+	}
+	p, err := exec.LookPath(cmd)
+	if err != nil {
+		return fail(name,
+			fmt.Sprintf("%s registers the worker as %q, and that is NOT on PATH — Claude Code reports the server as `failed` and no mcp__worker__implement tool exists, so nothing can be delegated", source, cmd),
+			"install it globally (`npm i -g rig-move-llm`), or put the binary on the PATH of whatever launches Claude Code")
+	}
+	return pass(name, fmt.Sprintf("%s found at %s (registered in %s)", cmd, p, source))
+}
+
+// workerMCPCommand reads back the registration rig actually wrote, rather than
+// assuming what it would have written: the point of the rung is to check the
+// file on disk, which may be from an older install or hand-edited.
+func workerMCPCommand() (cmd, source string) {
+	type entry struct {
+		Command string `json:"command"`
+	}
+	// Project scope first — a project-root .mcp.json wins for this directory.
+	if data, err := os.ReadFile(".mcp.json"); err == nil {
+		var f struct {
+			MCPServers map[string]entry `json:"mcpServers"`
+		}
+		if json.Unmarshal(data, &f) == nil {
+			if e, ok := f.MCPServers["worker"]; ok && e.Command != "" {
+				return e.Command, ".mcp.json"
+			}
+		}
+	}
+	if data, err := os.ReadFile(userClaudeJSON()); err == nil {
+		var f struct {
+			MCPServers map[string]entry `json:"mcpServers"`
+		}
+		if json.Unmarshal(data, &f) == nil {
+			if e, ok := f.MCPServers["worker"]; ok && e.Command != "" {
+				return e.Command, "~/.claude.json (user scope)"
+			}
+		}
+	}
+	return "", ""
+}
+
+// --- rung 6: the guards ---------------------------------------------------
 
 // checkGuards reports the two ceilings rather than judging them: silence, then
 // total wall, then the per-call timeout rig declares to the client. The ladder
@@ -352,7 +422,7 @@ func envSource(key string) string {
 	return ""
 }
 
-// --- rung 6: the MAIN leg can start a session at all ----------------------
+// --- rung 7: the MAIN leg can start a session at all ----------------------
 
 // checkMainAuth is the hole the other rungs left open. Measured
 // 2026-07-30: an install answered all-PASS in a HOME where `claude` had never

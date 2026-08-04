@@ -27,7 +27,7 @@ type Config struct {
 	WorkerAPIKey    string
 	WorkerModel     string // model name the worker MCP tool sends to the worker endpoint
 	Backend         Backend
-	Enabled         bool   // master on/off: when false the hook passes every tool through (Claude Code behaves normally, no offload/force-delegate). Defaults to true when a worker endpoint is set, false when it is skipped; an explicit ENABLED overrides.
+	Enabled         bool   // master on/off: when false nothing is offloaded and Claude Code behaves normally. Defaults to true when a worker endpoint is set, false when it is skipped; an explicit ENABLED overrides.
 	LogBodies       bool   // opt-in full request/response logging (default: metadata only)
 	LogMaxMB        int    // size cap for logs/requests.jsonl before compaction (default 50)
 	DataDir         string // scope dir where logs/stats are written (resolved local|global)
@@ -38,26 +38,8 @@ type Config struct {
 	WorkerHealthPath string
 	HealthTimeoutMs  int // per-probe HTTP timeout (default 2000)
 	HealthCacheSec   int // reuse a probe result for this many seconds (default 15)
-	// GateMode selects the delegation posture (map6 cost-aware gate):
-	//   "hard" (default) — MAIN is plan/delegate/review only; every Edit is denied.
-	//   "soft"           — explore-first: Stage-0 evidence + a triage declaration can
-	//                      open a bounded solo edit window, and a small Gate B repair
-	//                      window opens after each worker return. Rollback = flip the key.
-	GateMode string
-	// VerifyCmd is the shell command `rig cascade` runs to decide whether the
-	// qwen (worker) pass resolved the task (exit 0 = resolved, non-zero = escalate
-	// to Claude). Set via VERIFY_CMD, e.g. "pytest -q". When empty the cascade uses
-	// a weaker compile/lint + non-empty-diff floor instead (see internal/cli).
-	VerifyCmd string
-	// WorkerEngine selects how the worker MCP's implement tool runs (map10 P2;
-	// auto-default since P4's flip gate passed):
-	//   ""     (default) — auto: cc when CCBaseURL is configured, loop otherwise.
-	//   "cc"             — force the native `claude -p` subprocess (B5). Needs
-	//                      the claude CLI on PATH and CCBaseURL set.
-	//   "loop" (or any other value) — force the built-in 3-tool loop.
-	WorkerEngine string
 	// CCBaseURL is the Anthropic-format base URL the cc engine points its
-	// subprocess at (RIG_CC_BASE_URL). Required when WorkerEngine is "cc": with
+	// subprocess at (RIG_CC_BASE_URL). Required: with
 	// it empty the engine refuses to launch, because the subprocess would
 	// otherwise bill the worker leg to the paid account (money-safety rail).
 	CCBaseURL string
@@ -189,11 +171,6 @@ func LoadFrom(projectDir string) Config {
 		enabled = truthy(v)
 	}
 
-	gateMode := strings.ToLower(strings.TrimSpace(get("GATE_MODE")))
-	if gateMode != "soft" {
-		gateMode = "hard"
-	}
-
 	return Config{
 		Port:             port,
 		MainUpstreamURL:  strings.TrimRight(get("MAIN_UPSTREAM_URL"), "/"),
@@ -208,9 +185,6 @@ func LoadFrom(projectDir string) Config {
 		WorkerHealthPath: healthPath,
 		HealthTimeoutMs:  healthTimeout,
 		HealthCacheSec:   healthCache,
-		GateMode:         gateMode,
-		VerifyCmd:        strings.TrimSpace(get("VERIFY_CMD")),
-		WorkerEngine:     strings.ToLower(strings.TrimSpace(get("RIG_WORKER_ENGINE"))),
 		CCBaseURL:        strings.TrimRight(strings.TrimSpace(get("RIG_CC_BASE_URL")), "/"),
 		CCModel:          strings.TrimSpace(get("RIG_CC_MODEL")),
 		RouteAllToWorker: truthy(get("RIG_ROUTE_ALL_TO_WORKER")),

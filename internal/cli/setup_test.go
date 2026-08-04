@@ -2,7 +2,6 @@ package cli
 
 import (
 	"encoding/json"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,7 +11,9 @@ import (
 )
 
 // TestApplyInitGlobalFollowsYou asserts the global "follows you" wiring: a
-// user-scope worker in ~/.claude.json, a SessionStart hook, and ENABLED=true.
+// user-scope worker in ~/.claude.json, the tool-permission grant, and
+// ENABLED=true. Since S4 there is no SessionStart hook to assert: every hook rig
+// installed called `rig hook`, which no longer exists.
 func TestApplyInitGlobalFollowsYou(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -39,10 +40,13 @@ func TestApplyInitGlobalFollowsYou(t *testing.T) {
 		t.Errorf("worker not registered at user scope: %s", data)
 	}
 
-	// SessionStart hook (the Serena-like auto-materialize trigger)
+	// The global settings carry the grant and NO hook.
 	sdata, _ := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
-	if !strings.Contains(string(sdata), "SessionStart") || !strings.Contains(string(sdata), "session-start") {
-		t.Errorf("SessionStart hook not wired: %s", sdata)
+	if !strings.Contains(string(sdata), workerToolPermission) {
+		t.Errorf("tool permission not granted at global scope: %s", sdata)
+	}
+	if strings.Contains(string(sdata), "hook") {
+		t.Errorf("a global install still wires a hook; `rig hook` was deleted in S4: %s", sdata)
 	}
 
 	// global config carries ENABLED=true
@@ -80,71 +84,5 @@ func TestCCDefaultBaseIsOwnServeRoute(t *testing.T) {
 	}
 	if got := ccDefaultBase(""); got != "http://localhost:4000/r/worker" {
 		t.Errorf("ccDefaultBase(\"\") = %q", got)
-	}
-}
-
-func TestSessionStartMaterializes(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	gdir := filepath.Join(home, config.DirName)
-	if err := os.MkdirAll(gdir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(gdir, config.ConfigFile),
-		[]byte("WORKER_API_BASE=http://w:8000/v1\nWORKER_API_KEY=secret\nENABLED=true\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	proj := t.TempDir()
-	t.Setenv("CLAUDE_PROJECT_DIR", proj)
-
-	if rc := cmdSessionStart(strings.NewReader("{}"), io.Discard); rc != 0 {
-		t.Fatalf("cmdSessionStart rc=%d", rc)
-	}
-
-	local := filepath.Join(proj, config.DirName, config.ConfigFile)
-	data, err := os.ReadFile(local)
-	if err != nil {
-		t.Fatalf("per-project config not materialized: %v", err)
-	}
-	// inherit-not-copy (the Serena model): the marker carries NO settings, so a
-	// global change propagates. It must not duplicate worker settings or the key.
-	if strings.Contains(string(data), "\nWORKER_API_BASE=") ||
-		strings.Contains(string(data), "\nENABLED=") ||
-		strings.Contains(string(data), "secret") {
-		t.Errorf("materialized config must inherit, not copy settings, got: %s", data)
-	}
-	// everything resolves from the global scope...
-	cfg := config.LoadFrom(proj)
-	if cfg.WorkerAPIKey != "secret" {
-		t.Errorf("key should inherit global, got %q", cfg.WorkerAPIKey)
-	}
-	if cfg.WorkerAPIBase != "http://w:8000/v1" {
-		t.Errorf("base should inherit global, got %q", cfg.WorkerAPIBase)
-	}
-	if !cfg.Enabled {
-		t.Error("ENABLED should inherit global true")
-	}
-	// ...but the project owns its own data dir (stats/logs)
-	if want := filepath.Join(proj, config.DirName); cfg.DataDir != want {
-		t.Errorf("dataDir should be project-local %q, got %q", want, cfg.DataDir)
-	}
-	if _, err := os.Stat(filepath.Join(proj, config.DirName, ".gitignore")); err != nil {
-		t.Errorf(".gitignore not written: %v", err)
-	}
-
-	// The conflict fix: flipping the GLOBAL switch propagates to the materialized
-	// project (it inherits, it did not copy).
-	if err := os.WriteFile(filepath.Join(gdir, config.ConfigFile),
-		[]byte("WORKER_API_BASE=http://w:8000/v1\nWORKER_API_KEY=secret\nENABLED=false\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if config.LoadFrom(proj).Enabled {
-		t.Error("global ENABLED=false must propagate to the materialized project (inherit, not copy)")
-	}
-
-	// idempotent: a second session must not clobber or error
-	if rc := cmdSessionStart(strings.NewReader("{}"), io.Discard); rc != 0 {
-		t.Errorf("second cmdSessionStart rc=%d", rc)
 	}
 }

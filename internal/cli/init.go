@@ -11,7 +11,7 @@ import (
 
 	"github.com/Cheevatech/rig-move-llm/internal/config"
 	"github.com/Cheevatech/rig-move-llm/internal/service"
-	"github.com/Cheevatech/rig-move-llm/internal/worker"
+	"github.com/Cheevatech/rig-move-llm/internal/thin"
 )
 
 // initOpts is the resolved bootstrap request. Both cmdInit (flag-driven) and the
@@ -25,8 +25,7 @@ type initOpts struct {
 	workerKey    string
 	mainUpstream string
 	port         string
-	workerEngine string // "" | "loop" | "cc" — RIG_WORKER_ENGINE (default: loop)
-	ccBase       string // RIG_CC_BASE_URL, required when workerEngine == "cc"
+	ccBase       string // RIG_CC_BASE_URL — the endpoint the switch points claude -p at
 	ccModel      string // RIG_CC_MODEL (default haiku)
 	enabled      bool   // ENABLED written to config; false = wired but inert (Claude Code runs normally)
 	npxWorker    bool   // spawn the worker MCP as `npx -y rig-move-llm worker` (zero global install)
@@ -40,7 +39,7 @@ type initOpts struct {
 }
 
 // cmdInit bootstraps a scope: it writes the config file and wires Claude Code
-// (hooks + permissions + worker MCP + output style) so that a plain `claude`
+// (permissions + the switch's MCP entry) so that a plain `claude`
 // launches a working hybrid. Local (default) touches only this project; --global
 // touches ~/.claude and applies to every project (the "follows you" mode).
 func cmdInit(args []string) int {
@@ -52,9 +51,8 @@ func cmdInit(args []string) int {
 	workerKey := fs.String("worker-key", "", "worker API key (optional for local models)")
 	mainUpstream := fs.String("main-upstream", "https://api.anthropic.com", "paid (main-leg) upstream")
 	port := fs.String("port", "4000", "proxy listen port")
-	workerEngine := fs.String("worker-engine", "", "worker engine: loop (default, built-in 3-tool loop) | cc (native `claude -p` subprocess — experimental)")
-	ccBase := fs.String("cc-base-url", "", "cc engine: Anthropic-format base URL for the worker model (required with --worker-engine=cc)")
-	ccModel := fs.String("cc-model", "", "cc engine: model name the subprocess runs as (default haiku)")
+	ccBase := fs.String("cc-base-url", "", "Anthropic-format base URL the switch points `claude -p` at")
+	ccModel := fs.String("cc-model", "", "model name the subprocess runs as (default haiku)")
 	npx := fs.Bool("npx", false, "spawn the worker via `npx -y rig-move-llm worker` (no global binary needed)")
 	force := fs.Bool("force", false, "overwrite an existing config file")
 	noDetect := fs.Bool("no-detect", false, "skip probing for a local worker endpoint")
@@ -69,18 +67,6 @@ func cmdInit(args []string) int {
 
 	if *svc && !*global {
 		fmt.Fprintln(os.Stderr, "init: --service requires --global (the daemon reads ~/.rig-move-llm/config.env, not a project dir)")
-		return 2
-	}
-	switch *workerEngine {
-	case "", "loop", "cc":
-	default:
-		fmt.Fprintln(os.Stderr, "init: --worker-engine must be loop or cc")
-		return 2
-	}
-	// Fail here, not at first delegation: the cc engine refuses to run without a
-	// base URL (its subprocess would bill the worker leg to the paid account).
-	if *workerEngine == "cc" && *ccBase == "" {
-		fmt.Fprintln(os.Stderr, "init: --worker-engine=cc requires --cc-base-url (an Anthropic-format endpoint for the worker model — the cc engine refuses to launch without one)")
 		return 2
 	}
 
@@ -101,7 +87,7 @@ func cmdInit(args []string) int {
 	return applyInit(initOpts{
 		global: *global, backend: *backend, workerBase: *workerBase,
 		workerModel: *workerModel, workerKey: *workerKey, mainUpstream: *mainUpstream,
-		port: *port, workerEngine: *workerEngine, ccBase: *ccBase, ccModel: *ccModel,
+		port: *port, ccBase: *ccBase, ccModel: *ccModel,
 		// A worker endpoint was configured -> enable; otherwise stay inert.
 		enabled:   *workerBase != "" || *backend != "",
 		npxWorker: *npx, service: *svc, force: *force, noDetect: *noDetect,
@@ -133,7 +119,7 @@ func applyInit(o initOpts) int {
 		if err := os.WriteFile(cfgPath, []byte(renderConfigEnv(configEnvVals{
 			backend: o.backend, workerBase: o.workerBase, workerModel: o.workerModel,
 			workerKey: o.workerKey, mainUpstream: o.mainUpstream, port: o.port,
-			workerEngine: o.workerEngine, ccBase: o.ccBase, ccModel: o.ccModel,
+			ccBase: o.ccBase, ccModel: o.ccModel,
 			enabled: o.enabled,
 		})), 0o600); err != nil {
 			fmt.Fprintln(os.Stderr, "init: write config:", err)
@@ -160,16 +146,16 @@ func applyInit(o initOpts) int {
 		fmt.Println("registered", canon, "in", config.ProjectsPath())
 	}
 
-	// 2. Claude Code wiring (hooks + permissions + session-start auto-materialize).
+	// 2. Claude Code wiring (permissions + MCP pre-approve). No hooks since S4.
 	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
 		fmt.Fprintln(os.Stderr, "init:", err)
 		return 1
 	}
-	if err := wireSettings(filepath.Join(claudeDir, "settings.json"), filepath.Join(dataDir, "settings.json.bak"), config.Load().GateMode, o.npxWorker); err != nil {
+	if err := wireSettings(filepath.Join(claudeDir, "settings.json"), filepath.Join(dataDir, "settings.json.bak")); err != nil {
 		fmt.Fprintln(os.Stderr, "init: settings:", err)
 		return 1
 	}
-	fmt.Println("wired hooks + permissions in", filepath.Join(claudeDir, "settings.json"))
+	fmt.Println("wired permissions in", filepath.Join(claudeDir, "settings.json"))
 
 	// 2b. Workspace trust (#16). Those permissions are ignored outright until
 	// Claude Code trusts this directory, so either grant it — on an explicit
@@ -191,15 +177,15 @@ func applyInit(o initOpts) int {
 		}
 	}
 
-	// 3. MCP config for `run --mcp-config` back-compat: the same worker (+optional
-	// toolbelt) served as a one-off file. Bare `claude` ignores this; it reads the
-	// project-root .mcp.json (local) or the user-scope ~/.claude.json (global).
+	// 3. MCP config for `run --mcp-config` back-compat: the same one server, served
+	// as a one-off file. Bare `claude` ignores this; it reads the project-root
+	// .mcp.json (local) or the user-scope ~/.claude.json (global).
 	mcpPath := filepath.Join(dataDir, "mcp.json")
 	if err := os.WriteFile(mcpPath, []byte(renderMCP(o.npxWorker)), 0o644); err != nil {
 		fmt.Fprintln(os.Stderr, "init: mcp:", err)
 		return 1
 	}
-	fmt.Println("wrote MCP config (worker + toolbelt)", mcpPath)
+	fmt.Println("wrote MCP config", mcpPath)
 
 	// 4. Auto-wire so a PLAIN `claude` offloads to the worker with no flags.
 	//   - local: a project-root .mcp.json CC auto-discovers, pre-approved by
@@ -226,7 +212,7 @@ func applyInit(o initOpts) int {
 	// wiring, not changes: an untracked .claude/ and .mcp.json otherwise show up
 	// in the worker's returned diff as if the worker had authored them (#26), and
 	// `git stash -u` — which the proof-retry protocol uses to reach a red state —
-	// would sweep away the hook config mid-round. .git/info/exclude is the right
+	// would sweep away rig's own config mid-run. .git/info/exclude is the right
 	// home: it is local and never committed, so rig does not edit a .gitignore the
 	// user owns and shares.
 	if canon, err := config.CanonicalPath("."); err == nil {
@@ -237,41 +223,44 @@ func applyInit(o initOpts) int {
 		}
 	}
 
-	// 4d. Output style = the persistent, SYSTEM-PROMPT-tier terse-delegate workflow
-	// (no-flag equivalent of P9's --append-system-prompt). wireSettings activates it.
-	stylePath := filepath.Join(claudeDir, "output-styles", "rig-delegate.md")
-	if err := os.MkdirAll(filepath.Dir(stylePath), 0o755); err != nil {
-		fmt.Fprintln(os.Stderr, "init: output-styles dir:", err)
-		return 1
-	}
-	if err := os.WriteFile(stylePath, []byte(outputStyleMD), 0o644); err != nil {
-		fmt.Fprintln(os.Stderr, "init: output style:", err)
-		return 1
-	}
-	// The soft-gate (explore-first) sibling style is always written too; which one
-	// is ACTIVE is decided by wireSettings from GATE_MODE, so flipping the mode is
-	// a config change + settings rewire, not a reinstall.
-	explorePath := filepath.Join(claudeDir, "output-styles", "rig-explore.md")
-	if err := os.WriteFile(explorePath, []byte(exploreStyleMD), 0o644); err != nil {
-		fmt.Fprintln(os.Stderr, "init: output style:", err)
-		return 1
-	}
-	fmt.Println("wrote output styles", stylePath, explorePath)
-
-	// 4c. Delegate-only steer (guidance, not enforcement). Never clobber a user's
-	// CLAUDE.md: write only when absent (or already ours).
+	// 4c. The steer. rig no longer writes an output style: that tier is
+	// system-prompt-level and session-global, which is what made it enforcement in
+	// the first place — and A1 measured the cost of it leaking, when the worker
+	// inherited MAIN's style telling it not to edit files and dutifully tried to
+	// delegate its own job. CLAUDE.md is the tier that matches the decision
+	// (told, not forced): it is guidance, the user can read and edit it, and it
+	// does not overwrite Claude Code's own idea of what it is.
+	//
+	// Never clobber a user's CLAUDE.md: write only when absent (or already ours).
 	memPath := filepath.Join(claudeDir, "CLAUDE.md")
 	if existing, err := os.ReadFile(memPath); err != nil {
-		if err := os.WriteFile(memPath, []byte(delegateSteerMD), 0o644); err != nil {
+		if err := os.WriteFile(memPath, []byte(steerMD), 0o644); err != nil {
 			fmt.Fprintln(os.Stderr, "init: CLAUDE.md:", err)
 			return 1
 		}
-		fmt.Println("wrote delegate steer", memPath)
+		fmt.Println("wrote steer", memPath)
 	} else if strings.Contains(string(existing), steerSentinel) {
-		fmt.Println("delegate steer already present in", memPath)
+		if err := os.WriteFile(memPath, []byte(steerMD), 0o644); err != nil {
+			fmt.Fprintln(os.Stderr, "init: CLAUDE.md:", err)
+			return 1
+		}
+		fmt.Println("updated steer", memPath)
 	} else {
-		fmt.Printf("NOTE: %s exists — add the delegate steer manually or see .claude/CLAUDE.md guidance (leaving it untouched)\n", memPath)
+		fmt.Printf("NOTE: %s exists and is not ours — leaving it untouched; add the steer by hand if you want it\n", memPath)
 	}
+
+	// 4d. The button. Same one tool underneath, so there is nothing to keep in
+	// sync — the command file is a few lines that call it (S1).
+	cmdPath := filepath.Join(claudeDir, "commands", "qwen.md")
+	if err := os.MkdirAll(filepath.Dir(cmdPath), 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, "init: commands dir:", err)
+		return 1
+	}
+	if err := os.WriteFile(cmdPath, []byte(qwenCommandMD), 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, "init: /qwen command:", err)
+		return 1
+	}
+	fmt.Println("wrote /qwen command", cmdPath)
 
 	// 5. OS service (optional): supervise `serve` across reboots.
 	if o.service {
@@ -303,7 +292,7 @@ func applyInit(o initOpts) int {
 
 type configEnvVals struct {
 	backend, workerBase, workerModel, workerKey, mainUpstream, port string
-	workerEngine, ccBase, ccModel                                   string
+	ccBase, ccModel                                                 string
 	enabled                                                         bool
 }
 
@@ -326,9 +315,8 @@ func renderConfigEnv(v configEnvVals) string {
 	kv("worker model name", "WORKER_MODEL", v.workerModel)
 	kv("worker API key (optional for local models; use an OpenRouter key for OpenRouter)", "WORKER_API_KEY", v.workerKey)
 	b.WriteString("\n")
-	kv("worker engine: loop (default, built-in 3-tool loop) | cc (native `claude -p` subprocess on the worker endpoint — experimental, needs the claude CLI on PATH)", "RIG_WORKER_ENGINE", v.workerEngine)
-	kv("cc engine only: Anthropic-format base URL for the worker model — REQUIRED for cc (keeps the worker leg off the paid account; the engine refuses to run without it)", "RIG_CC_BASE_URL", v.ccBase)
-	kv("cc engine only: model name the subprocess runs as (default haiku — the worker-leg routing key on the shim)", "RIG_CC_MODEL", v.ccModel)
+	kv("Anthropic-format base URL the switch points `claude -p` at — REQUIRED (it keeps the worker leg off the paid account; the switch refuses to run without it)", "RIG_CC_BASE_URL", v.ccBase)
+	kv("model name the subprocess runs as (default haiku — the worker-leg routing key on the shim)", "RIG_CC_MODEL", v.ccModel)
 	b.WriteString("\n")
 	// Master on/off. Written explicitly so the state is unambiguous: false = wired
 	// but inert (Claude Code runs normally), flip to true after setting an endpoint.
@@ -336,7 +324,7 @@ func renderConfigEnv(v configEnvVals) string {
 	if v.enabled {
 		enabled = "true"
 	}
-	kv("master switch: true = offload active; false = Claude Code runs normally (no force-delegate). Skipping the worker in setup leaves this false.", "ENABLED", enabled)
+	kv("master switch: true = offload active; false = Claude Code runs normally. Skipping the worker in setup leaves this false.", "ENABLED", enabled)
 	kv("paid main-leg upstream (raw passthrough, OAuth untouched)", "MAIN_UPSTREAM_URL", v.mainUpstream)
 	kv("proxy listen port", "PORT", v.port)
 	b.WriteString("\n")
@@ -360,13 +348,14 @@ func renderConfigEnv(v configEnvVals) string {
 // the idle timeout — without it a stdio server that answers only at the end of a
 // long round (which is exactly what the worker does) is aborted after 30 minutes
 // of "idleness" while it is in fact working. rig sizes it above its own wall guard
-// so the engine is always the one that kills the round and can return a diagnosis.
+// so the run is always the one that kills itself and can return a diagnosis and the
+// partial diff.
 func workerMCPEntry(npx bool) map[string]any {
-	entry := map[string]any{"type": "stdio", "command": "rig-move-llm", "args": []string{"worker"}}
+	entry := map[string]any{"type": "stdio", "command": "rig-move-llm", "args": []string{"thin-worker"}}
 	if npx {
-		entry = map[string]any{"type": "stdio", "command": "npx", "args": []string{"-y", "rig-move-llm", "worker"}}
+		entry = map[string]any{"type": "stdio", "command": "npx", "args": []string{"-y", "rig-move-llm", "thin-worker"}}
 	}
-	entry["timeout"] = int(worker.ClientCallTimeout() / time.Millisecond)
+	entry["timeout"] = int(thin.ClientCallTimeout() / time.Millisecond)
 	return entry
 }
 
@@ -378,10 +367,9 @@ func workerMCPEntry(npx bool) map[string]any {
 // stays a plain OpenAI client with no coupling to our compute.
 func renderMCP(npx bool) string {
 	servers := map[string]any{
-		// The worker MCP server is the Option-2 offload mechanism: CC spawns it on
-		// stdio and calls its `implement` tool, whose agentic loop runs on the
-		// configured worker endpoint (guaranteed egress, independent of CC's
-		// in-process agent runtime — see ticket P9).
+		// The one server. CC spawns it on stdio and calls its `implement` tool,
+		// which runs `claude -p` against the configured endpoint — guaranteed
+		// egress, independent of CC's in-process agent runtime (ticket P9).
 		"worker": workerMCPEntry(npx),
 	}
 	out, _ := json.MarshalIndent(map[string]any{"mcpServers": servers}, "", "  ")
@@ -453,10 +441,16 @@ func modelNote(model string) string {
 // headless `claude -p` burns the run asking a human to click allow (#6).
 const workerToolPermission = "mcp__worker__implement"
 
-// wireSettings merges the rig-move-llm hooks into an existing (or new) Claude Code
+// wireSettings grants the switch's MCP tool in an existing (or new) Claude Code
 // settings.json, preserving unrelated keys. The original file is backed up once to
 // backupPath so `uninstall` can restore it verbatim.
-func wireSettings(path, backupPath, gateMode string, npx bool) error {
+//
+// It no longer writes hooks. rig used to install four (PreToolUse denying MAIN's
+// edit tools, PostToolUse gating the return, SessionStart, UserPromptSubmit) —
+// all of them served the contract layer, and all of them called `rig hook`, a
+// subcommand that no longer exists. The switch is something Claude is TOLD to
+// use, not forced to.
+func wireSettings(path, backupPath string) error {
 	settings := map[string]any{}
 	if data, err := os.ReadFile(path); err == nil {
 		_ = json.Unmarshal(data, &settings)
@@ -468,14 +462,6 @@ func wireSettings(path, backupPath, gateMode string, npx bool) error {
 	// Pre-approve the project-root .mcp.json server so headless `claude -p` does not
 	// hang on the MCP trust dialog (see memory cc-persistent-autowire-recipe).
 	settings["enableAllProjectMcpServers"] = true
-
-	// hookCmd returns the correct hook command form based on the --npx flag.
-	hookCmd := func(args ...string) string {
-		if npx {
-			return "npx -y rig-move-llm hook " + strings.Join(args, " ")
-		}
-		return "rig-move-llm hook " + strings.Join(args, " ")
-	}
 
 	// Trust alone is not permission (#6): a headless -p run still stalls on the
 	// tool-permission dialog for the worker tool. Grant it here, preserving any
@@ -498,42 +484,6 @@ func wireSettings(path, backupPath, gateMode string, npx bool) error {
 	perms["allow"] = allow
 	settings["permissions"] = perms
 
-	// Activate the output style — the system-prompt-tier workflow lever (P10).
-	// hard gate = terse plan→delegate→review; soft gate (map6) = explore-first:
-	// Stage-0 explore → triage solo|delegate → act. Loaded by bare `claude` at
-	// session start; no CLI flag.
-	if gateMode == "soft" {
-		settings["outputStyle"] = "rig-explore"
-	} else {
-		settings["outputStyle"] = "rig-delegate"
-	}
-
-	settings["hooks"] = map[string]any{
-		"PreToolUse": []any{map[string]any{
-			"matcher": "*",
-			"hooks":   []any{map[string]any{"type": "command", "command": hookCmd("pre-tool")}},
-		}},
-		"PostToolUse": []any{map[string]any{
-			// Gate on the worker MCP tool return (Option 2) and on legacy/teammate
-			// Task/Agent returns.
-			"matcher": "Task|Agent|mcp__worker__implement",
-			"hooks":   []any{map[string]any{"type": "command", "command": hookCmd("post-tool"), "timeout": 600}},
-		}},
-		// SessionStart: lazily materialize a per-project .rig-move-llm/ carrying the
-		// configured settings, the way Serena creates .serena on first session. Runs
-		// on a new session or a resume; context-only, never blocks.
-		"SessionStart": []any{map[string]any{
-			"matcher": "startup|resume",
-			"hooks":   []any{map[string]any{"type": "command", "command": hookCmd("session-start")}},
-		}},
-		// UserPromptSubmit: probe the worker endpoint once per message (zero-token
-		// HTTP GET). An unreachable worker flips the per-tool hooks to passthrough so
-		// the hybrid degrades to plain Claude Code automatically. Never blocks.
-		"UserPromptSubmit": []any{map[string]any{
-			"hooks": []any{map[string]any{"type": "command", "command": hookCmd("user-prompt")}},
-		}},
-	}
-
 	out, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return err
@@ -541,109 +491,68 @@ func wireSettings(path, backupPath, gateMode string, npx bool) error {
 	return os.WriteFile(path, append(out, '\n'), 0o644)
 }
 
-// steerSentinel marks a CLAUDE.md as rig-move-llm-authored so uninstall can remove
-// it without touching a user's own memory file.
+// steerSentinel marks a file as rig-move-llm-authored so uninstall can remove it
+// without touching a user's own memory file. The string is unchanged from the
+// enforcement era on purpose: an install made by an older rig carries it too, and
+// uninstall has to recognise those as ours.
 const steerSentinel = "<!-- rig-move-llm:delegate-steer -->"
 
-// outputStyleMD is the terse plan→delegate→review workflow, ported from the proven
-// hybrid-shim --append-system-prompt (which measured −30% billed output vs solo) to
-// reference the mcp__worker__implement offload tool. keep-coding-instructions: true
-// makes it APPEND to CC's default system prompt (append-equivalent), the closest
-// persistent match to that flag. The force-delegate hook remains the hard enforcer;
-// this recovers the savings the hook alone does not (it curbs MAIN verbosity).
-const outputStyleMD = `---
-name: rig-delegate
-description: Terse plan -> delegate to worker -> review orchestrator for the subscription-preserving hybrid.
-keep-coding-instructions: true
----
+// steerMD is what rig tells Claude, and the whole of it.
+//
+// Two things shape this text, and both were paid for:
+//
+// The first paragraph exists because THIS FILE IS ALSO READ BY THE WORKER. rig's
+// steer lands in the user's project, and the worker runs `claude -p` in that same
+// project, where CLAUDE.md is auto-discovered. The old steer said "Delegate ALL
+// code changes; do not edit files yourself" — A1 measured the worker reading that
+// and trying to hand its own job to a subagent in 10–23% of runs. So the file
+// disarms itself against the one fact that separates the two readers: MAIN has
+// the implement tool, the worker does not (--strict-mcp-config leaves it with no
+// MCP servers at all — verified in the init event of every live run).
+//
+// The rest is guidance rather than prohibition because the enforcement it used to
+// describe is gone (S4), and because the reason for enforcing was a pipeline with
+// nobody watching. There is somebody watching now.
+const steerMD = steerSentinel + `
+# Delegating implementation in this repo
 
-You are the MAIN agent in a subscription-preserving hybrid. Your inference is paid;
-the worker (a local/cheap model behind the mcp__worker__implement tool) is free. Your
-job is ONLY:
+**If you do not have a tool called ` + "`mcp__worker__implement`" + `, stop here — the rest of this
+file is not about you.** You are the one doing the work: read and edit the files
+yourself and run this repo's own tests.
 
-1. PLAN — understand the task and outline the approach in 1-3 terse sentences.
-2. DELEGATE — hand ALL code changes, file edits, command/test runs, and knowledge/
-   search lookups to the worker by calling the mcp__worker__implement tool with a
-   scoped spec. Do NOT edit files or run commands yourself — those tools are blocked
-   for you by design (a PreToolUse hook denies them). If you catch yourself about to
-   edit or run a test, stop and delegate instead.
-3. REVIEW — read the worker's summary and the gate result. Before closing, confirm the
-   change introduced no NEW test failure: the worker must have run the full test file(s)
-   covering the code it touched and reported them green (not just the one new/target test).
-   If any pre-existing test now fails because of the change (common when the fix constrains
-   behaviour an existing test relied on), that is fallout — re-delegate to fix it. This
-   regression check is NOT optional, even when terse. When it is clean, reply with ONLY a
-   short closing line (files changed + outcome); claim nothing more. You may Read/Grep/Glob
-   to plan and review. If the worker's result carries an UNPROVEN marker, you MUST NOT close
-   green — report the fix as unverified, verbatim, and let the user decide.
-4. WHEN A ROUND FAILS — a result with stopped="timeout" means rig killed that round on its
-   own wall/stall guard: the worker stopped making progress, so re-running the SAME spec
-   hits the same wall. Never re-delegate an unchanged spec after a timeout. Report the
-   diagnosis to the user and say what you would try next — a narrower slice, a different
-   file, or a check that the worker endpoint is healthy. Delegations are also budgeted per
-   turn: when the budget is spent the hook denies the call and says so. That is the signal
-   to stop and report to the human, never to look for another route to the same call.
+If you do have it, then implementation is cheaper somewhere else. Your inference is
+paid for; the model behind that tool runs on a local or cheap endpoint. So the split
+worth defaulting to is:
 
-Be terse in every message: a brief plan, the delegation, a brief review. No verbose
-explanations, no restating the task, no narrating what you are about to do. Prefer
-delegating on the first try to avoid wasted round-trips.
+- **Think here.** Understand the task, pick the approach, and scope the change down
+  to something one pass can finish.
+- **Hand the doing over.** Call ` + "`mcp__worker__implement`" + ` with the task in plain language,
+  with enough detail to act on without coming back to ask. It works in the repo with
+  the full Claude Code harness: it reads, edits, and runs the tests.
+- **Pass the result on.** It returns a status line, a path to its run log, the diff,
+  and the last command it ran. Show the diff. You are not being asked to certify it —
+  a human reads it and decides.
+
+Nothing prevents you from editing files yourself, and sometimes you should: a one-line
+change you are already sure of is not worth a round trip. This is a default, not a
+rule, and "this task is a bad fit for the worker" is a fine thing to say out loud.
 `
 
-// exploreStyleMD is the soft-gate (map6) workflow: offload the READING to the
-// free worker first, decide solo|delegate on grounded evidence, and use the
-// bounded solo/repair windows the hook opens instead of paying delegation
-// round-trips for tiny changes.
-const exploreStyleMD = `---
-name: rig-explore
-description: Explore-first cost-aware orchestrator - Stage-0 worker explore, evidence-based triage, solo tiny edits or delegate.
-keep-coding-instructions: true
+// qwenCommandMD is the direct button. It calls the same one tool the steer names,
+// so there are not two surfaces to keep in sync (S1).
+//
+// It leaks into the worker's own slash_commands list — every one of the user's
+// commands does, verified in the init event — but a slash command is inert until
+// somebody types it, and nobody types this one inside a worker session.
+const qwenCommandMD = steerSentinel + `
+---
+description: Hand a task to the local worker model and show me the diff
 ---
 
-You are the MAIN agent in a subscription-preserving hybrid. Your inference is paid;
-the worker (a local/cheap model behind the mcp__worker__* tools) is free. Reading the
-repo yourself is the biggest cost sink — offload it. Workflow, in order:
+Call ` + "`mcp__worker__implement`" + ` with the task below, then show me the diff it returns.
 
-1. EXPLORE (Stage 0, free) — for any task that touches the repo, FIRST call
-   mcp__worker__explore ONCE with the task. It returns machine-verified evidence:
-   relevant files, candidate edit sites (path:line + verbatim snippets checked
-   against disk), entrypoints/repro, and declared blind spots. It runs to
-   completion in that single call (rig explores large repos in internal rounds),
-   so you do not loop it. Do not pre-read the repo yourself; at most spot-check
-   2-3 of the returned citations with Read.
-2. TRIAGE (Gate A) — call mcp__worker__triage with decision "solo" or "delegate"
-   plus a one-line reason citing the evidence. solo = ONE obvious small edit at a
-   verified site, no open questions. delegate = multi-file, needs investigation or
-   repro, ambiguous, or ANY uncertainty. The declaration is checked against the
-   evidence and may be overridden to delegate — accept the effective decision.
-3. ACT —
-   - solo: make the small edit yourself at the verified site (the hook allows only
-     the grounded files, size-bounded), then verify via the worker or close.
-   - delegate: call mcp__worker__implement with a scoped spec that INCLUDES the
-     Stage-0 evidence (files, sites, repro) so the worker does not re-explore.
-4. REVIEW — read the worker's summary, diff, and gate result. Confirm no NEW test
-   failure (the worker must have run the full affected test file(s), not just the
-   target test); hit_iteration_cap=true means extra scrutiny. If the returned work
-   has a TINY residue (typo-scale, a couple of lines), patch it directly — a short
-   repair window is open after each worker return. Anything bigger: re-delegate.
-5. WHEN A ROUND FAILS — stopped="timeout" means rig killed that round on its own
-   wall/stall guard, so the same spec will stall again: never re-delegate it
-   unchanged. Delegations are budgeted per turn; when the budget is spent the hook
-   denies the call. Both are the signal to stop and report to the human — the
-   diagnosis, and the smallest next step you would take.
+Do not implement it yourself, and do not re-run or re-verify what it did — I read the
+diff and decide. If the task is too vague to act on, say so instead of guessing.
 
-Be terse in every message: brief plan, the tool calls, a brief review, a one-line
-close (files changed + outcome). No verbose explanations, no restating the task.
-`
-
-const delegateSteerMD = steerSentinel + `
-# Delegation
-
-This project runs a subscription-preserving hybrid: heavy code work is offloaded to
-a local/cheap worker model, keeping the paid main-leg budget for planning and review.
-
-**Delegate ALL code implementation to the ` + "`mcp__worker__implement`" + ` tool.** Do not edit
-files, run tests, or run shell commands yourself — hand the scoped task to the worker
-tool, which edits files, runs the project's real tests as its gate, and reports back.
-Plan and review here; implement there. (A PreToolUse hook enforces this — delegating
-on the first try just avoids the deny round-trip.)
+Task: $ARGUMENTS
 `

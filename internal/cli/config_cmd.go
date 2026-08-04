@@ -40,13 +40,13 @@ func setEnabled(name string, args []string, on bool) int {
 	}
 	if on {
 		fmt.Printf("ENABLED=true — offload active for %s\n%s\n", scope, path)
-		// Enabling without a worker endpoint means the force-delegate hook has nothing
+		// Enabling without a worker endpoint means the switch has nothing
 		// to delegate to; warn rather than silently break the next session.
 		if config.Load().WorkerAPIBase == "" {
 			fmt.Println("WARNING: no worker endpoint resolves — set WORKER_API_BASE (run `rig-move-llm config --open`) or the hook will block tools with no worker to run them.")
 		}
 	} else {
-		fmt.Printf("ENABLED=false — Claude Code runs normally for %s (no offload/force-delegate)\n%s\n", scope, path)
+		fmt.Printf("ENABLED=false — Claude Code runs normally for %s (no offload)\n%s\n", scope, path)
 	}
 	return 0
 }

@@ -60,41 +60,32 @@ func cmdSetup(args []string) int {
 	}
 	o.enabled = o.workerBase != ""
 
-	// 2b. Worker engine — HOW the offloaded work runs. Only asked when a worker
-	// endpoint exists; the default stays the built-in loop (map10: cc flips to
-	// default only after the P4 evidence gate passes, never because of lab numbers).
+	// 2b. The Anthropic-format endpoint the switch points `claude -p` at. It is
+	// no longer a choice between engines — S4 deleted the loop and the contract
+	// layer it served, so this is THE mechanism. It ships in the product itself:
+	// `rig-move-llm serve` exposes /r/worker, translating Anthropic /v1/messages
+	// to the worker endpoint configured above (#13 / map13 A4 MAJOR-2 — an empty
+	// default here was a dead end for anyone who did not already know that).
 	if o.workerBase != "" {
 		fmt.Println()
-		eng := tui.Select("Worker engine — how should the worker execute?", []tui.Option{
-			{Label: "loop", Description: "built-in 3-tool loop (no extra dependencies)", Recommended: true},
-			{Label: "cc", Description: "native `claude -p` subprocess on your endpoint (experimental; needs the claude CLI + an Anthropic-format endpoint)"},
-		}, 0)
-		if eng == 1 {
-			// The Anthropic-format endpoint the cc engine needs ships in the product
-			// itself: `rig-move-llm serve` exposes /r/worker, translating Anthropic
-			// /v1/messages to the worker endpoint configured above (#13 / map13 A4
-			// MAJOR-2 — an empty default here was a dead end for anyone who did not
-			// already know that).
-			base := tui.Prompt("cc base URL",
-				"Anthropic-format endpoint for the worker model. Enter = rig's own serve route (run `rig-move-llm serve` before launching claude) — it translates to the worker endpoint above. Type `loop` to keep the loop engine",
-				ccDefaultBase(o.port))
-			if base == "" || strings.EqualFold(base, "loop") {
-				fmt.Println("  keeping the loop engine (the cc engine refuses to run without a base URL; it would bill the worker leg to your paid account).")
-			} else {
-				o.workerEngine = "cc"
-				o.ccBase = base
-				o.ccModel = tui.Prompt("cc model name", "model the subprocess runs as", "haiku")
-			}
+		base := tui.Prompt("switch base URL",
+			"Anthropic-format endpoint for the worker model. Enter = rig's own serve route (run `rig-move-llm serve` before launching claude) — it translates to the worker endpoint above",
+			ccDefaultBase(o.port))
+		if base == "" {
+			fmt.Println("  no base URL — the switch will refuse to run rather than bill the worker leg to your paid account.")
+		} else {
+			o.ccBase = base
+			o.ccModel = tui.Prompt("switch model name", "model the subprocess runs as", "haiku")
 		}
 	}
 
-	// 3. Make the binary permanent. The hooks invoke `rig-move-llm ...`, so it must
+	// 3. Make the binary permanent. The MCP entry invokes `rig-move-llm ...`, so it must
 	//    stay on PATH — but `npx rig-move-llm` runs transiently. Install it globally
 	//    now (that is what makes this a single command). Skipped when it is already
 	//    a real global install (not the npx cache).
 	if !globallyInstalled() {
 		fmt.Println()
-		if tui.Confirm("Install rig-move-llm globally now? (the hooks call `rig-move-llm`, so it must stay on your PATH)",
+		if tui.Confirm("Install rig-move-llm globally now? (the MCP entry calls `rig-move-llm`, so it must stay on your PATH)",
 			"run `npm install -g rig-move-llm`", "skip — I'll install it myself before launching claude", true) {
 			c := exec.Command("npm", "install", "-g", "rig-move-llm")
 			c.Stdout, c.Stderr = os.Stdout, os.Stderr

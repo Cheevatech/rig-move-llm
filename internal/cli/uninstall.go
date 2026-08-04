@@ -76,6 +76,12 @@ func cmdUninstall(args []string) int {
 		remove(filepath.Join(".", ".mcp.json"))
 	}
 	removeOwnedSteer(filepath.Join(claudeDir, "CLAUDE.md"))
+	removeOwnedSteer(filepath.Join(claudeDir, "commands", "qwen.md"))
+	// prune the commands dir if ours was the only file in it
+	_ = os.Remove(filepath.Join(claudeDir, "commands"))
+	// init stopped writing these in S4, but uninstall must still remove them:
+	// a machine that installed an older rig has them on disk, and this is the
+	// only thing that ever cleans them up.
 	remove(filepath.Join(claudeDir, "output-styles", "rig-delegate.md"))
 	remove(filepath.Join(claudeDir, "output-styles", "rig-explore.md"))
 	// prune the output-styles dir if we left it empty
@@ -185,8 +191,9 @@ func mentionsRig(entry any) bool {
 	return false
 }
 
-// removeOwnedSteer deletes the delegate-steer CLAUDE.md only if it carries our
-// sentinel, so a user's own memory file is never touched.
+// removeOwnedSteer deletes a file only if it carries our sentinel, so a user's own
+// memory file or slash command is never touched. Both the current steer and the
+// one older versions wrote carry the same marker, so this reverses either.
 func removeOwnedSteer(path string) {
 	data, err := os.ReadFile(path)
 	if err != nil {

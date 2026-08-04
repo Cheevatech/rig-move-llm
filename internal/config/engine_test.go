@@ -6,30 +6,27 @@ import (
 	"testing"
 )
 
-// The default engine is the built-in loop: absent keys resolve to empty, so a
-// binary with no cc configuration behaves exactly like the pre-B5 product.
-func TestWorkerEngineDefaultsEmpty(t *testing.T) {
+// A binary with no switch configuration resolves the keys empty — and the switch
+// itself refuses to launch on an empty base URL rather than bill the worker leg
+// to the paid account, so "empty" is a safe default rather than a broken one.
+func TestSwitchKeysDefaultEmpty(t *testing.T) {
 	c := LoadFrom(t.TempDir())
-	if c.WorkerEngine != "" || c.CCBaseURL != "" || c.CCModel != "" {
-		t.Errorf("engine keys must default empty, got engine=%q base=%q model=%q",
-			c.WorkerEngine, c.CCBaseURL, c.CCModel)
+	if c.CCBaseURL != "" || c.CCModel != "" {
+		t.Errorf("switch keys must default empty, got base=%q model=%q", c.CCBaseURL, c.CCModel)
 	}
 }
 
-func TestWorkerEngineFromConfigFile(t *testing.T) {
+func TestSwitchKeysFromConfigFile(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, DirName), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	content := "RIG_WORKER_ENGINE=CC\nRIG_CC_BASE_URL=http://localhost:4001/\nRIG_CC_MODEL=haiku\n"
+	content := "RIG_CC_BASE_URL=http://localhost:4001/\nRIG_CC_MODEL=haiku\n"
 	if err := os.WriteFile(filepath.Join(dir, DirName, ConfigFile), []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	c := LoadFrom(dir)
-	if c.WorkerEngine != "cc" {
-		t.Errorf("engine should normalize to lowercase cc, got %q", c.WorkerEngine)
-	}
 	if c.CCBaseURL != "http://localhost:4001" {
 		t.Errorf("base should be trimmed of the trailing slash, got %q", c.CCBaseURL)
 	}
@@ -38,18 +35,18 @@ func TestWorkerEngineFromConfigFile(t *testing.T) {
 	}
 }
 
-func TestWorkerEngineEnvOverridesFile(t *testing.T) {
+func TestSwitchKeysEnvOverridesFile(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, DirName), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, DirName, ConfigFile),
-		[]byte("RIG_WORKER_ENGINE=cc\n"), 0o600); err != nil {
+		[]byte("RIG_CC_MODEL=fromfile\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("RIG_WORKER_ENGINE", "loop")
+	t.Setenv("RIG_CC_MODEL", "fromenv")
 
-	if c := LoadFrom(dir); c.WorkerEngine != "loop" {
-		t.Errorf("env must override the file, got %q", c.WorkerEngine)
+	if c := LoadFrom(dir); c.CCModel != "fromenv" {
+		t.Errorf("env must override the file, got %q", c.CCModel)
 	}
 }

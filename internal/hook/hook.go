@@ -33,7 +33,12 @@ import (
 
 // payload is the subset of the Claude Code hook stdin we consume.
 type payload struct {
-	AgentID   string `json:"agent_id"`
+	AgentID string `json:"agent_id"`
+	// SessionID identifies the Claude Code session this call belongs to. The cc
+	// worker engine spawns its subprocess with a session id it chose and
+	// registered, which is how a worker proves it is a worker without an
+	// inheritable environment variable (#42).
+	SessionID string `json:"session_id"`
 	ToolName  string `json:"tool_name"`
 	ToolInput struct {
 		FilePath        string `json:"file_path"`
@@ -125,12 +130,25 @@ func (s *State) healthDownActive() bool {
 // equivalent here. The MAIN (lead) process is launched without RIG_AGENT_ID and
 // its payloads have no agent_id, so it keeps its plan/delegate/review-only
 // posture (reliability floor #1: the lead can never obtain a worker marker).
-func effectiveAgentID(p payload) string {
+//
+// The cc worker proves its identity a third way: the engine registers the
+// session id it spawns the subprocess with, and only that session's payloads
+// carry it. Unlike RIG_AGENT_ID a session id is not inherited, so the worker's
+// own `go test` is plain MAIN-less Claude Code again (#42).
+func (s *State) effectiveAgentID(p payload) string {
 	if p.AgentID != "" {
 		return p.AgentID
 	}
+	if gatestate.IsWorkerSession(s.StateDir, p.SessionID) {
+		return ccWorkerAgentID
+	}
 	return os.Getenv("RIG_AGENT_ID")
 }
+
+// ccWorkerAgentID is the identity a registered cc worker session reports as. It
+// mirrors the constant the worker engine stamps, so force-delegate.log reads the
+// same whichever way the worker was recognised.
+const ccWorkerAgentID = "cc-worker"
 
 // workerTool is the OPTION-2 offload tool (P9): the MAIN agent delegates all code
 // work by calling it. Its server key ("worker") is fixed by the generated
@@ -156,7 +174,7 @@ func (s *State) PreTool(r io.Reader, w io.Writer) error {
 		return nil
 	}
 
-	agentID := effectiveAgentID(p)
+	agentID := s.effectiveAgentID(p)
 	s.logf("agent_id=%s tool=%s", orMain(agentID), or(p.ToolName, "?"))
 
 	// Subagent (or teammate): allow everything (it is the worker).
@@ -344,7 +362,7 @@ func (s *State) PostTool(r io.Reader, w io.Writer) error {
 
 	// Only MAIN's delegate returns are gate points: the worker MCP tool (Option 2)
 	// or a legacy/teammate Task/Agent.
-	if effectiveAgentID(p) != "" {
+	if s.effectiveAgentID(p) != "" {
 		return nil
 	}
 	if p.ToolName != workerTool && p.ToolName != "Task" && p.ToolName != "Agent" {

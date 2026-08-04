@@ -211,6 +211,12 @@ func (e *Engine) implementCC(ctx context.Context, absRepo, task, gateDir string)
 
 	res.Diff, res.FilesChanged = e.collectDiff(ctx, absRepo)
 
+	// Same rule as the stash check, one step further along: whether the tree the
+	// round returns is intact is a fact about the diff, not a claim in the
+	// summary. A conflict-marked file is the visible half of the retry
+	// instruction the worker ignored (#54 probe).
+	noteConflictMarkers(&res)
+
 	// Engine gate: any round that returns a non-empty diff is gated.
 	// - Killed rounds (Stopped=="timeout") keep the original adapter byte-identical.
 	// - Normal rounds with a diff get the engine's own measurement alongside the worker's claim.

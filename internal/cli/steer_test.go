@@ -185,3 +185,64 @@ func initInto(t *testing.T, existing string) string {
 	}
 	return proj
 }
+
+// The branch that matters most at global scope: the user already has a
+// CLAUDE.md. Their file is theirs, so it is not touched — but leaving it at that
+// means the install has no steer at all and MAIN never learns the switch exists.
+// The steer goes to its own file and the user is handed the exact line to add.
+func TestSteerGoesToASideFileWhenTheUserOwnsTheirCLAUDEmd(t *testing.T) {
+	const mine = "@RTK.md\n# my own global instructions\nalways answer in Thai\n"
+	proj := initInto(t, mine)
+
+	memPath := filepath.Join(proj, ".claude", "CLAUDE.md")
+	got, _ := os.ReadFile(memPath)
+	if string(got) != mine {
+		t.Errorf("the user's CLAUDE.md was modified:\n%s", got)
+	}
+
+	side := filepath.Join(proj, ".claude", steerImportFile)
+	body, err := os.ReadFile(side)
+	if err != nil {
+		t.Fatalf("no steer anywhere: the install would never tell MAIN about the switch (%v)", err)
+	}
+	if !strings.Contains(string(body), "mcp__worker__implement") {
+		t.Errorf("the side file is not the steer:\n%s", body)
+	}
+	if !strings.Contains(string(body), steerSentinel) {
+		t.Error("the side file carries no sentinel, so uninstall cannot tell it is ours")
+	}
+}
+
+// Once the user has added the import line, a re-run updates the steer in place
+// rather than repeating instructions they have already followed.
+func TestSteerRecognisesAnExistingImport(t *testing.T) {
+	proj := initInto(t, "@"+steerImportFile+"\n# and my own notes\n")
+	if !importedBy(filepath.Join(proj, ".claude", "CLAUDE.md"), steerImportFile) {
+		t.Error("importedBy did not see the import line it is meant to detect")
+	}
+	if _, err := os.Stat(filepath.Join(proj, ".claude", steerImportFile)); err != nil {
+		t.Errorf("the imported steer was not written: %v", err)
+	}
+}
+
+func TestImportedByIgnoresNearMisses(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "CLAUDE.md")
+	for _, tc := range []struct {
+		body string
+		want bool
+	}{
+		{"@" + steerImportFile + "\n", true},
+		{"  @" + steerImportFile + "  \n", true},
+		{"see @" + steerImportFile + " for details\n", false},
+		{"@other.md\n", false},
+		{"", false},
+	} {
+		if err := os.WriteFile(p, []byte(tc.body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := importedBy(p, steerImportFile); got != tc.want {
+			t.Errorf("importedBy(%q) = %v, want %v", tc.body, got, tc.want)
+		}
+	}
+}

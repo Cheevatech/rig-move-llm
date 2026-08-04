@@ -77,6 +77,10 @@ func cmdUninstall(args []string) int {
 	}
 	removeOwnedSteer(filepath.Join(claudeDir, "CLAUDE.md"))
 	removeOwnedSteer(filepath.Join(claudeDir, "commands", "qwen.md"))
+	// The side file written when the user owns their own CLAUDE.md. Their @-import
+	// line is left in place: it is one line in a file we do not own, and an import
+	// of a missing file is inert.
+	removeOwnedSteer(filepath.Join(claudeDir, steerImportFile))
 	// prune the commands dir if ours was the only file in it
 	_ = os.Remove(filepath.Join(claudeDir, "commands"))
 	// init stopped writing these in S4, but uninstall must still remove them:

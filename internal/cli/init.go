@@ -246,7 +246,25 @@ func applyInit(o initOpts) int {
 		}
 		fmt.Println("updated steer", memPath)
 	} else {
-		fmt.Printf("NOTE: %s exists and is not ours — leaving it untouched; add the steer by hand if you want it\n", memPath)
+		// Their file, their call — but "add the steer by hand" is not an
+		// instruction anybody can act on, and on a machine that already has a
+		// CLAUDE.md (a common case, and the default one at global scope) this
+		// branch is how an install ends up with no steer at all: MAIN is never
+		// told the switch exists. So the steer goes in its own file and the user
+		// is given the exact one line that pulls it in — the same @-import their
+		// own memory files already use.
+		sidePath := filepath.Join(claudeDir, steerImportFile)
+		if err := os.WriteFile(sidePath, []byte(steerMD), 0o644); err != nil {
+			fmt.Fprintln(os.Stderr, "init: steer:", err)
+			return 1
+		}
+		if importedBy(memPath, steerImportFile) {
+			fmt.Printf("updated steer %s (imported by your %s)\n", sidePath, memPath)
+		} else {
+			fmt.Printf("NOTE: %s is yours, so it was left untouched. The steer is in %s —\n"+
+				"  add this one line to %s to switch it on:\n\n      @%s\n\n",
+				memPath, sidePath, memPath, steerImportFile)
+		}
 	}
 
 	// 4d. The button. Same one tool underneath, so there is nothing to keep in
@@ -489,6 +507,26 @@ func wireSettings(path, backupPath string) error {
 		return err
 	}
 	return os.WriteFile(path, append(out, '\n'), 0o644)
+}
+
+// steerImportFile is where the steer goes when the user owns their CLAUDE.md.
+// Claude Code resolves `@name.md` inside a memory file, so one line pulls it in
+// and deleting that line switches it off without touching anything else.
+const steerImportFile = "rig-move-llm.md"
+
+// importedBy reports whether the memory file already pulls in name via @import,
+// so a re-run says "updated" instead of repeating instructions already followed.
+func importedBy(memPath, name string) bool {
+	data, err := os.ReadFile(memPath)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == "@"+name {
+			return true
+		}
+	}
+	return false
 }
 
 // steerSentinel marks a file as rig-move-llm-authored so uninstall can remove it

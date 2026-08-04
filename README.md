@@ -1,84 +1,48 @@
 # rig-move-llm
 
-**Move the heavy lifting off your paid LLM.** A local proxy that lets Claude Code keep planning on your paid subscription while every code change, file edit, test run, and knowledge lookup is delegated to a **worker model of your choice** — your own local model (llama.cpp / Ollama / ExLlama) or any API endpoint (OpenRouter, …). The worker's output is verified by a deterministic gate before it ever reaches the paid agent, so you save tokens *without* trading away correctness.
+**Move the heavy lifting off your paid LLM.** rig is a switch: Claude Code keeps planning and scoping on your paid subscription, and hands the actual implementation to a **worker model of your choice** — your own local model (llama.cpp / Ollama / ExLlama) or any API endpoint (OpenRouter, …). The worker runs the *full* Claude Code harness on your endpoint: it reads, edits, and runs your tests. Then it hands you back the diff.
 
-> Status: **early / pre-release.** Proxy, translation, hooks, installer, and the reboot-safe daemon are working and validated end-to-end. The savings number below is a single measured instance (n=1) — treat it as evidence the mechanism produces a real saving on a real fix, then measure your own workload with `rig-move-llm stats`.
+**You read the diff.** That is the check. rig does not certify the worker's output, and it does not ask the paid agent to certify it either.
+
+> Status: **pre-release, and the architecture just changed.** See [What changed in 0.8](#what-changed-in-08) — the previous design (a hook that denied the paid agent its tools, plus a deterministic gate on the worker's result) has been removed, along with its savings measurement.
 
 ## Why
 
-On a subscription, the only lever is **paid-agent output tokens**. `rig-move-llm`:
+On a subscription, the only lever is **paid-agent output tokens**. rig moves the token-expensive part — investigating, editing, running tests, retrying — onto an endpoint you control.
 
-- **Offloads** every code change to a worker tool (`mcp__worker__implement`) that runs on *your* endpoint, out-of-process; the main agent stays on Anthropic direct and only plans/reviews.
-- **Forces delegation** structurally — the paid agent plans/reviews only; a hook denies it the mutating/heavy tools so the work goes to the free/cheap worker.
-- **Gates the result** deterministically (frozen fail-before repro + compile/lint floor + scoped regression) so a "cheaper" answer can't be a wrong answer.
-- **Brings your own model** — local (free compute) or API (cheap, not free). Nothing points at anyone else's compute.
+Three moving parts, and deliberately no fourth:
 
-Headless / AFK oriented (worker models are slower than the frontier); not aimed at interactive latency.
+- **The switch.** One MCP tool, `mcp__worker__implement`. It spawns `claude -p` against your endpoint, in your repo, and returns what happened.
+- **The guards.** A ceiling on silence and a ceiling on total time, so a small model that gets lost stops burning instead of running until someone notices.
+- **A way to see it and stop it.** `rig watch` follows what the worker is doing, live, one line per action — and cancelling actually kills the process tree (see [Stopping a run](#stopping-a-run)).
 
-## What you save
+Headless / AFK oriented: worker models are slower than the frontier. This is for work you are willing to walk away from, not for interactive latency.
 
-Measured on one hard SWE-bench-style Python instance (flask-4045), main agent = Claude
-Sonnet, worker = a local 27B model, delegation enforced 100% by the hook:
+## What this claims, and what it does not
 
-- **Paid-agent output tokens: −37%** — 2,579 billed output tokens vs 4,069 solving the
-  same fix solo. Every edit and test run — the heavy work — executed on the local
-  worker, off your Anthropic quota. (A terser configuration reached −52% but skipped the
-  review round that catches worker fallout; the shipping default keeps a mandatory
-  regression check, so −37% is the number you actually get.)
-- **Correctness held.** The target test passed and no pre-existing test regressed — and
-  a solo baseline left this same instance *unresolved*, so here the hybrid solved what
-  solo could not. This is not the general rule (see variance disclosure below); it is
-  one honest data point.
-- **Wall time: slower** — ~20 min here vs a few minutes solo (worker throughput). This
-  tool is for headless / AFK / overnight work, not interactive latency.
+**The mechanism is real and checkable:** worker inference goes to *your* endpoint and never reaches api.anthropic.com. `rig-move-llm doctor` proves each link before you trust any number, and `rig-move-llm stats` separates the legs.
 
-This is **n=1**. It shows the mechanism produces a real output-token saving on a real
-fix; it is not a benchmark. An earlier 7-task pilot of the predecessor (base-URL)
-design showed the same *shape* — quality roughly at parity and output savings that are
-**bimodal** (heavy tasks save the most; trivial tasks can cost more than they save,
-because the fixed plan/review overhead dominates the little work delegated). That is why
-this tool targets heavy, headless work. Measure your own with `rig-move-llm stats`.
+**There is currently no savings number, on purpose.** The −37% figure this README used to carry was measured on the previous architecture — the one with the force-delegate hook and the deterministic gate — and both of those are gone. Quoting a number produced by machinery that no longer ships would be worse than quoting none. A fresh A/B against the current design has not been run yet.
 
-### What "savings" means, precisely
+What is still true regardless of architecture:
 
-- **Quota is counted server-side.** Worker requests go to *your* endpoint and never
-  reach api.anthropic.com — worker generation is 100% outside your Anthropic quota.
-- **It is not "100% free."** Worker output that the main agent reads back counts as
-  main-agent *input* tokens. Input is ~5× cheaper than output, and the deterministic
-  gate shrinks what the main agent reads back to a short verdict — but it is not zero.
-- **Client-side displays lie a little.** Claude Code's `/cost` (and tools like ccusage)
-  count tokens the client saw, including rerouted worker traffic — that display is
-  cosmetic, not your bill. `rig-move-llm stats` separates the legs honestly; its
-  main-leg counts are validated to match Anthropic's own reported `input_tokens` /
-  `output_tokens` exactly on a live instance. (Prompt-cache reads/writes are billed
-  by Anthropic but not yet tracked in the ledger — the savings claims above are
-  output-token-centric, which caching doesn't touch.)
-- **Two worker tiers, two claims.** A **local** worker (llama.cpp / Ollama / vLLM) is
-  free compute — heavy work leaves your quota entirely. An **API** worker (OpenRouter
-  etc.) is *cheaper, not free*: you pay per token, typically well below Claude output
-  rates, and tool-call/streaming support varies by upstream model (which can affect
-  how much actually gets delegated).
-- **Variance disclosure.** Worker patches vary run-to-run (we observed two equivalent
-  patches differing by one line with different hidden-test outcomes). With arbitrary
-  user endpoints the variance is larger. We therefore claim the *cost floor* and
-  *quality parity mechanism*, not absolute resolve rates — **measure on your own
-  workload** (`rig-move-llm stats --history`).
+- **Quota is counted server-side.** Worker generation is 100% outside your Anthropic quota when the worker is a local model.
+- **It is not "100% free."** The diff the worker returns becomes paid-agent *input* when the paid agent reads it back. Input is far cheaper than output, but it is not zero.
+- **Client-side displays lie a little.** Claude Code's `/cost` counts tokens the client saw, including rerouted worker traffic. That display is cosmetic, not your bill.
+- **A local worker is free compute; an API worker is cheaper, not free.**
+- **Worker output varies run to run.** Two runs of the same task can produce materially different patches. This is the reason the design ends with a human reading the diff rather than with a gate declaring success — see the worked example in [What changed in 0.8](#what-changed-in-08).
 
 ## Architecture (one binary)
 
 ```
 Claude Code ──> rig-move-llm proxy ─> api.anthropic.com   (main leg: raw passthrough, OAuth untouched, usage metered)
      │          (ANTHROPIC_BASE_URL)
-     └─ mcp__worker__implement ─────> your endpoint         (worker leg: out-of-process MCP tool, Anthropic<->OpenAI, off the paid ledger)
+     └─ mcp__worker__implement ─────> your endpoint       (worker leg: out-of-process, off the paid ledger)
 ```
 
-The offload runs through a worker MCP tool, not the proxy: on Claude Code 2.1.x native
-subagents run in-process and never egress to a base-URL proxy, so the main agent delegates
-code work to `mcp__worker__implement` (out-of-process, guaranteed to reach your worker
-endpoint). The proxy is the **main-leg observability layer** — it forwards the paid traffic
-verbatim and meters what it spends. One static Go binary, stdlib-only, replaces what
-previously needed a Node shim **and** Python LiteLLM; cross-compiles to macOS / Linux /
-Windows (amd64 + arm64) with zero toolchain.
+The offload runs through an MCP tool, not the proxy: on Claude Code 2.1.x native subagents run in-process and never egress to a base-URL proxy, so an MCP server is the only place a second model can actually be substituted. The proxy is the **main-leg observability layer** — it forwards paid traffic verbatim, meters what it spends, and serves the Anthropic-format endpoint the worker points at (`/r/worker`).
+
+One static Go binary, stdlib-only. Cross-compiles to macOS / Linux / Windows (amd64 + arm64) with zero toolchain.
 
 ## Configuration (bring-your-own endpoint)
 
@@ -88,292 +52,156 @@ WORKER_MODEL=qwen2.5-coder:32b
 WORKER_API_KEY=...                               # or an OpenRouter key: https://openrouter.ai/api/v1
 MAIN_UPSTREAM_URL=https://api.anthropic.com
 PORT=4000
-WORKER_HEALTH_PATH=/v1/models                    # health-check probed each message; set off to disable
+
+RIG_CC_BASE_URL=http://127.0.0.1:4000/r/worker   # REQUIRED: Anthropic-format endpoint for the worker
+RIG_CC_MODEL=haiku                               # model name the subprocess runs as
 ```
 
-The setup wizard collects these for you — this is what it writes to `config.env`. Scope is
-**global** (all projects, follows you) or **project** (this dir only); `ENABLED` gates the whole
-thing on/off.
+`RIG_CC_BASE_URL` is not optional and has no default. The switch **refuses to launch** without it rather than let the worker's inference bill your paid account — the failure mode it prevents is silent and expensive, so it is a hard stop rather than a warning. rig serves a suitable endpoint itself: run `rig-move-llm serve` and point at its `/r/worker` route, which translates Anthropic `/v1/messages` to the OpenAI-compatible endpoint configured above.
 
-### Worker engine: loop (default) or cc (experimental)
+The setup wizard collects all of this; you should not need to hand-edit `config.env`. Scope is **global** (all projects, follows you) or **project** (this dir only); `ENABLED` gates the whole thing on and off.
 
-The worker MCP's `implement` tool has two interchangeable engines; MAIN sees the same result
-shape either way.
+## Guards: what bounds one delegation
 
-- **`loop`** (default) — the built-in 3-tool loop (read / edit / run) driving your OpenAI-compatible
-  endpoint. No extra dependencies.
-- **`cc`** (experimental) — the worker runs as a native `claude -p` subprocess whose inference is
-  pointed at **your** endpoint, so it brings the full Claude Code harness (investigate, edit, test,
-  self-correct) to one delegation instead of bouncing rounds back to the main agent. Requires the
-  `claude` CLI on PATH and an **Anthropic-format** endpoint for the worker model.
+Two ceilings, both env-overridable, and they must stay in order — the run has to be the thing that kills itself, so it can return a diagnosis *and the partial diff* instead of leaving the caller with a bare client-side abort.
 
 ```sh
-RIG_WORKER_ENGINE=                   # auto (default): cc when RIG_CC_BASE_URL is set, loop otherwise | cc | loop
-RIG_CC_BASE_URL=http://127.0.0.1:4000/r/worker  # REQUIRED for cc: Anthropic-format endpoint (rig serves one — see below)
-RIG_CC_MODEL=haiku                   # model name the subprocess runs as (default haiku)
+RIG_THIN_STALL=600        # seconds of total SILENCE before the run is killed (default 10m)
+RIG_THIN_WALL=3000        # seconds of total run time (default 50m)
 ```
 
-**Engine selection is automatic** (v0.6.1, after the cc engine passed its evidence gate on
-catch-rate, a fresh repo, and a second endpoint): configuring `RIG_CC_BASE_URL` is the opt-in —
-the cc engine runs whenever it is set. An install without it keeps the loop, and
-`RIG_WORKER_ENGINE=loop` forces the loop even with a base URL configured.
+Silence is a real liveness signal: a working agent emits a stream event per tool call. The one honest long silence is a `Bash` call that produces nothing until it returns, which Claude Code lets run about ten minutes — so the stall ceiling sits just past that.
 
-**Where do you get an Anthropic-format endpoint?** You already have one: the rig proxy itself.
-`rig-move-llm serve` translates Anthropic `/v1/messages` (streaming included) to your
-OpenAI-compatible `WORKER_API_BASE` / `WORKER_MODEL` on its **`/r/worker`** route, so the cc
-engine runs entirely in-product — no extra translator to install:
+`rig-move-llm doctor` prints the effective ladder (`stall < wall < client`) and the source of any env override, because a silent override is how two runs get compared as though they were the same configuration.
 
-```sh
-rig-move-llm serve --port 4000                    # the proxy the wizard already runs
-RIG_CC_BASE_URL=http://127.0.0.1:4000/r/worker    # cc subprocess -> rig -> your OpenAI endpoint
-```
+**A killed run still returns its diff.** Work that reached the working tree belongs to you regardless of how the process ended.
 
-The subprocess traffic lands in the worker ledger like any other worker call. Any other
-Anthropic-format endpoint (e.g. an external LiteLLM translation layer, or a provider that
-speaks the Anthropic API natively) works the same way.
+## Stopping a run
 
-`RIG_CC_BASE_URL` is a hard requirement, not a default: with it empty the engine **refuses to
-launch**, because the subprocess would otherwise bill its inference to your paid Anthropic account —
-the account this tool exists to protect. The subprocess authenticates with a dummy key (your
-OAuth/keychain identity is never exposed to the worker leg) and runs with web tools disabled. If your
-`claude` binary is too old to speak `--output-format stream-json`, the run fails with an explicit
-version-skew error rather than an empty result. The setup wizard offers this choice under
-"Worker engine"; the default stays `loop`.
+Cancelling a tool call in Claude Code, `SIGTERM`ing the MCP server, `SIGKILL`ing it, or closing its stdin all kill the worker and its whole process tree, within a second or so.
 
-**Known limitation — a green gate is not proof of correctness.** On an unselected
-SWE-bench_Lite sample, the delegated worker sometimes produced fixes that removed the reported
-symptom and kept every existing test green, yet still failed the issue's hidden acceptance
-tests — and the orchestrator signed off on the worker's "gate passed" report. The savings
-claim holds when the task's expected behaviour is stated precisely enough that the worker's
-own reproduction doubles as an acceptance test; when a bug report only describes a symptom,
-treat the worker's success report as unverified until a test you own covers the fix.
-
-### Automatic worker fallback (zero-token)
-
-The worker endpoint is bring-your-own, so it can be down when Claude Code is not. At the **start of
-every message** rig fires a **health check** — a plain HTTP `GET` on `WORKER_HEALTH_PATH` (no LLM
-tokens). If it **passes**, offload runs normally. If it **fails**, that turn automatically degrades
-to plain Claude Code (same as `ENABLED=false`): the force-delegate hooks pass through so the main
-agent edits and runs tests locally instead of blocking on a dead worker, and a one-line notice
-(`⚠️ worker healthcheck failed … falling back to local`) shows in the process stream. When the
-worker comes back, the next message resumes offload — all automatic, nothing to toggle.
-
-`WORKER_HEALTH_PATH` defaults to `/v1/models` (the universal, free liveness probe on any
-OpenAI-compatible endpoint); point it at `/health` for a server that exposes one, or set it to `off`
-to skip the pre-flight probe. Even with the probe off, a worker call that errors mid-turn falls back
-to local automatically. Tune with `WORKER_HEALTH_TIMEOUT_MS` (default 2000) and
-`WORKER_HEALTH_CACHE_SEC` (default 15, reuses a recent probe result across rapid turns).
-
-### Worker context budget (anti-hallucination checkpoint)
-
-A long implement or explore run can outgrow the worker model's context window — and an over-long
-context is exactly when a local model starts to hallucinate (one giant unverified edit instead of
-small, tested steps). rig watches the **real** context size (`usage.prompt_tokens` returned by every
-chat turn) and, when it crosses `RIG_WORKER_CTX_LIMIT` (default **48000** tokens — sized for a 64k
-local window; raise it for 128k/200k models), **checkpoints**: the conversation is reset and reseeded
-with a rig-assembled digest — the task, the current `git diff` from disk (the work so far — nothing
-is lost), the last test output, and the files already read. The worker is never asked to summarize
-itself, so the reset removes the bloated context rather than distilling it through a confused model.
-The worker stays a plain OpenAI-compatible endpoint; nothing special is required of it. The result's
-`checkpoints` field reports how many times this fired.
+This is called out explicitly because it did not use to be true, in any of those four ways: the server read stdin synchronously while a tool call ran, so a cancellation sat unread in a pipe buffer until the work it was cancelling had already finished. A worker could keep burning for over an hour after you pressed Esc. rig now reads stdin on its own goroutine, binds each call's context to its request id, and runs the worker under a small supervisor process that kills the tree if it is ever orphaned — which is the only thing that can cover `SIGKILL` of the server itself.
 
 ## Install & use
 
 ```sh
 npx rig-move-llm                   # one command → the setup wizard (installs itself on confirm)
-claude                             # plain Claude Code — auto-delegates to the worker, no flags
+claude                             # plain Claude Code — no flags, no wrapper
 ```
 
-`npx rig-move-llm` (or `rig-move-llm setup` if already installed) runs an **interactive wizard**: it
-asks the **scope** (`global` = every project, follows you; or `project` = this dir), then the
-**worker endpoint** — which you can **skip** by pressing Enter (rig installs but stays *off*, so
-Claude Code runs exactly as normal; turn it on later). It auto-detects a local Ollama/llama.cpp and
-offers it as the default. No config file to hand-edit. Because the hooks call `rig-move-llm`, the
-wizard offers to `npm install -g` itself so it stays on your PATH — so the single `npx` command sets
-up everything.
+`npx rig-move-llm` (or `rig-move-llm setup` if already installed) runs an **interactive wizard**: it asks the **scope** (`global` = every project, follows you; or `project` = this dir), then the **worker endpoint** — which you can **skip** by pressing Enter, leaving rig installed but *off*. It auto-detects a local Ollama/llama.cpp and offers it as the default.
 
-The wizard wires Claude Code so a **plain `claude`** (no flags, no wrapper) offloads to the worker:
-the `mcp__worker__implement` tool, the force-delegate + gate hooks, and a terse
-plan→delegate→review output style (`.claude/output-styles/rig-delegate.md`) that keeps the paid
-agent's output small, plus `.rig-move-llm/config.env`.
+The wizard wires Claude Code so a plain `claude` can offload with no flags:
 
-- **Global (follows you):** registers the worker at **user scope** in `~/.claude.json` and installs
-  global hooks + output style + a `SessionStart` hook — so **every** project offloads with no
-  per-project setup. On first session in a project the `SessionStart` hook lazily creates a
-  `.rig-move-llm/` there — the way Serena creates `.serena/`. It **inherits** every setting from the
-  global config (nothing is copied), so a later change to `~/.rig-move-llm/config.env` (endpoint,
-  model, `ENABLED` on/off) propagates to all projects. Add a `KEY=value` line in a project's
-  `.rig-move-llm/config.env` only to override one setting there (e.g. `ENABLED=false` to turn the
-  hybrid off in that project alone).
-- **Project:** wires only this directory (a project-root `.mcp.json`, pre-approved by
-  `enableAllProjectMcpServers` so the worker server loads without a prompt — see
-  [Headless](#headless-claude--p) for the third trust layer a never-opened project still needs).
+- `.mcp.json` — the `worker` MCP server, pre-approved via `enableAllProjectMcpServers` so a headless `claude -p` never hangs on a trust dialog
+- `.claude/settings.json` — a permission grant for the one tool
+- `.claude/CLAUDE.md` — the steer (see below)
+- `.claude/commands/qwen.md` — a `/qwen <task>` command for handing work over directly
+- `.rig-move-llm/config.env` — your configuration
 
-**Is it actually live?** `rig-move-llm doctor` runs the pre-flight ladder and exits non-zero if any
-rung fails: config + `ENABLED`, a **real completion** against the worker endpoint (a probe against
-`/v1/models` answers 200 on some servers even when the API key is wrong, so it cannot see an auth
-failure), the cc engine's endpoint and CLI, Claude Code's workspace trust, whether the force-delegate
-hook **actually denies** a MAIN `Bash` call, whether the repo's gate command is on **the PATH the
-worker inherits**, and the effective guard ladder. Run it before you trust any measurement — a rig
-that looks configured can still be delegating nothing, and a worker that cannot run your tests can
-only make claims.
+**rig installs no hooks.** The steer is guidance, not enforcement: it explains that implementation is cheaper on the other model and that the human reads the diff. Claude may still edit a file itself, and for a one-line change it probably should. A guide that is ignored is visible in your transcript; a hook that silently stops firing is not, which is the failure this design is built around.
 
-**What counts as your repo's gate.** rig infers it from the repo's own shape — `go.mod`,
-`Cargo.toml`, `pyproject.toml`, `setup.py`, `mix.exs`, `Package.swift`, `build.zig`, `pom.xml`,
-`build.gradle[.kts]`, `*.sln`/`*.csproj`, `phpunit.xml`, `.rspec`, `package.json`, `deno.json`,
-`Rakefile`, or a `Makefile` that declares a `test:` target. A build-tool wrapper the project ships
-(`./gradlew`, `./mvnw`, `vendor/bin/phpunit`) wins over the same tool on PATH, because that is the
-version the project pins. If your repo matches none of them, the engine falls back to **the gate
-command the worker itself ran in your repo** — rig re-runs it, with `RIG_*` scrubbed, and reads the
-exit code itself, so the verdict is still rig's own measurement and not the worker's word. The
-return says which of the two kinds you got. A command that turns out not to apply (`npm ERR! Missing
-script: test`, `No rule to make target 'test'`) is reported as *no gate ran*, never as a failing
-gate: a wrong verdict is worse than a missing one.
+**Global (follows you):** registers the worker at **user scope** in `~/.claude.json`, so every project offloads with no per-project setup, inheriting every setting from the global config — a later change to `~/.rig-move-llm/config.env` propagates everywhere. Add a `KEY=value` in a project's own `.rig-move-llm/config.env` only to override one setting there.
 
-**On / off switch.** `ENABLED` in `config.env` is the master toggle: `false` (the default when you
-skip the worker) means the hook passes every tool through and Claude Code behaves normally; set a
-worker endpoint and `ENABLED=true` to activate the offload — no re-install needed. Flip it from the
-CLI without touching the hidden dir: `rig-move-llm enable` / `rig-move-llm disable` (add `--local` to
-scope the flip to this project only). `rig-move-llm config` prints the effective configuration — which
-scope wins, the resolved worker endpoint, and the on/off state — and `rig-move-llm config --open`
-opens the target scope's `config.env` in your `$EDITOR`. `rig-move-llm run
--- claude` remains available when you also want the proxy's observability on the main leg. Reverse
-everything with `rig-move-llm uninstall` (restores your `settings.json` verbatim; strips the
-user-scope worker registration; reverts a workspace-trust grant rig made).
-`rig-move-llm init [--global] [--npx] [flags]` is the
-non-interactive form for scripts (`--npx` spawns the worker via `npx -y rig-move-llm worker`, no
-global binary needed for that leg).
+**Is it actually live?** `rig-move-llm doctor` runs the pre-flight ladder and exits non-zero if any rung fails: config + `ENABLED`; a **real completion** against the worker endpoint (a probe against `/v1/models` answers 200 on some servers even when the API key is wrong, so it cannot see an auth failure); the switch itself (the `claude` CLI on PATH and an Anthropic-format endpoint that answers); Claude Code's workspace trust; the guard ladder; and whether the paid leg has credentials to open a session at all. Run it before you trust any measurement — a rig that looks configured can still be delegating nothing.
 
-The npm package ships a single prebuilt static binary per platform via
-`optionalDependencies` (the esbuild/biome pattern — no postinstall download).
+**On / off.** `ENABLED` in `config.env` is the master toggle. Flip it with `rig-move-llm enable` / `rig-move-llm disable` (add `--local` for this project only). `rig-move-llm config` prints the effective configuration and which scope won; `--open` edits it. Reverse everything with `rig-move-llm uninstall` — it restores your `settings.json` verbatim, strips the user-scope registration, reverts a workspace-trust grant rig made, and removes files written by *older* versions too (the enforcement-era output styles and hooks), while leaving hooks and permissions you added yourself untouched.
 
-### Headless (`claude -p`)
+`rig-move-llm init [--global] [--npx] [flags]` is the non-interactive form for scripts. The npm package ships one prebuilt static binary per platform via `optionalDependencies` (the esbuild/biome pattern — no postinstall download).
 
-An unattended run has **three** separate gates in Claude Code, and rig's wiring covers them
-in two steps:
+## Headless (`claude -p`)
 
-| layer | what it gates | how it is granted |
-|---|---|---|
-| server trust | may the worker MCP server load at all | `enableAllProjectMcpServers`, written by `init` |
-| tool permission | may the agent call `mcp__worker__implement` without asking | `permissions.allow`, written by `init` |
-| **workspace trust** | is this directory trusted at all | the trust dialog — **or** `init --trust-workspace` |
+Three separate layers must all be satisfied or a headless run stalls waiting for a human who is not there:
 
-The third one is the trap: on a project that has never been opened interactively, Claude Code
-**discards the `permissions.allow` entry entirely** (`Ignoring 1 permissions.allow entry … this
-workspace has not been trusted`), so a headless run stops to ask a human and the run is wasted.
-`init` prints a notice when it sees this, with both ways out:
+1. **Workspace trust** — Claude Code ignores `permissions.allow` in a directory it does not trust. `rig-move-llm init --trust-workspace` grants it (and `uninstall` reverts it), or open the directory once interactively and accept the prompt.
+2. **Tool permission** — the grant for `mcp__worker__implement`, written by init.
+3. **MCP server approval** — `enableAllProjectMcpServers`, written by init.
+
+`doctor` checks the first and will tell you when the other two are being ignored because of it.
+
+## Watching a run
 
 ```sh
-claude                                   # once, interactively — accept the trust dialog
-rig-move-llm init --trust-workspace      # or grant it directly (RIG_INIT_TRUST=1 for scripts)
+rig-move-llm watch            # follow the newest run, live
+rig-move-llm watch --list     # recent runs, newest first, with their status
 ```
 
-`--trust-workspace` sets `projects["<this dir>"].hasTrustDialogAccepted` in your `~/.claude.json` —
-the same flag the dialog sets. It is **never** implied by a plain `init`: that dialog is Claude
-Code's safeguard against a repo you have not looked at yet, so switching it off stays an explicit
-act. The wizard asks the same question interactively, and `rig-move-llm uninstall` reverts a grant
-**rig** made — never one you accepted yourself.
-
-### Guards: what bounds one delegation
-
-A delegated round is bounded on both axes, so a worker that stops making progress fails loudly
-instead of hanging or looping:
-
-| knob | default | what it does |
-|---|---|---|
-| `RIG_CC_STALL_TIMEOUT` | `600s` | kills a cc-engine round whose stream has gone completely silent (a live worker emits an event per tool call; the longest honest silence is a Bash call, which Claude Code caps around 10 minutes). `0` disables |
-| `RIG_WORKER_RUN_TIMEOUT` | `3000s` | the wall for one `implement` call — measured in **working** time, i.e. wall clock minus the time the worker spent waiting on its own gate (see below). `0` disables |
-| `RIG_WORKER_GATE_CREDIT` | `1200s` | how much gate time the wall will excuse. The ceiling on one round is therefore wall + credit (`3000 + 1200 = 4200s`), and that ceiling must stay **below** the per-call `timeout` rig writes into the worker entry of `.mcp.json` (ceiling + 5 min), or the round dies without rig getting to explain why. That written timeout also raises Claude Code's stdio **idle** floor — without it a worker that answers only at the end of a long round is aborted after 30 min of "idleness" while it is still working (#33). Raising either knob means re-running `rig-move-llm init` so the `.mcp.json` timeout moves with it. `0` restores the pre-#57 behaviour (gate time charged like any other second) |
-| `RIG_MAX_DELEGATE_ROUNDS` | `3` | how many times the main agent may delegate within **one turn**. `0` disables |
-
-The wall discounts gate time because a worker sitting in `cargo test` is working, it is just doing
-it behind a compiler — and the guards were calibrated on repos whose gate takes ~2 seconds. On
-`tj/commander.js` a round was killed at the 50-minute wall in the middle of `node --test`, throwing
-away work that was already on disk (#57). The credit is a credit, not an exemption: past it the
-ceiling kills the round regardless, so a worker looping on its test command still dies. `rig-move-llm doctor`
-prints the whole ladder — stall &lt; wall &lt; ceiling &lt; client — with any env override named.
-
-A killed round returns `stopped: "timeout"` with what the worker was last seen doing and any
-partial diff, and the output style tells the main agent not to re-send the same spec. When the
-round budget is spent the hook denies the call and the agent reports to you instead — your next
-message resets the budget, so "just keep going" is a reply, not a flag.
-
-### Permissions posture (headless)
-
-Claude Code's auto-mode runs a model-based safety classifier before auto-approving
-Bash commands. In a headless hybrid run the main agent is already structurally denied
-mutating tools by the rig hook, and the worker's own tools run out-of-process on *your*
-endpoint — so the classifier is a redundant layer on the main leg. If you turn it off
-(headless allowlist / bypass permissions), understand what that means: you are trusting
-the hook + your own sandboxing instead of a second model opinion. Do this only for
-unattended runs in an environment you'd let a CI job loose in.
-
-Subcommands:
-
 ```
-rig-move-llm  (no args) | setup             guided setup wizard (scope + worker + wiring)
-                                             (arrow/space-select TUI on a terminal;
-                                              numbered line prompts when piped/headless)
-rig-move-llm enable  [--local]               turn offload ON  (flip ENABLED in config.env)
-rig-move-llm disable [--local]               turn offload OFF (Claude Code runs normally)
-rig-move-llm config  [--local] [--open]      show the effective config / open it in $EDITOR
-rig-move-llm serve [--port N] [--status]     run the routing proxy / report state
-rig-move-llm hook  pre-tool|post-tool|session-start  Claude Code hooks (force-delegate + gate + auto-materialize)
-rig-move-llm init  [--global] [--npx] [--service] [--trust-workspace] [flags]
-                                             non-interactive bootstrap
-                                             (--service: OS-supervised, survives reboots;
-                                              --trust-workspace: accept CC's workspace trust here)
-rig-move-llm uninstall [--global] [--purge]  reverse init for a scope (incl. OS service)
-rig-move-llm run   [--] <command...>         launch a command with the proxy wired in
-rig-move-llm stats [--reset|--history]       token accounting / savings
++00:39  Read   .../proj/utils.py
++00:49  Edit   .../proj/utils.py
++01:09  Bash   ./.venv/bin/python -m pytest -q
++01:09    ↳    FAILED · 1 failed, 5 passed
++01:24  Bash   ./.venv/bin/python -m pytest -q
++01:24    ↳    ok · 6 passed in 0.01s
++01:30  ──     finished
 ```
 
-### Agent teams (experimental)
+One line per action, stamped with time since the run started, so the question a
+20-to-50-minute run actually raises — is it working, or is it stuck? — is answered by
+looking. When nothing has happened for a while, watch says so and names the point at
+which the stall guard will act. It exits by itself when the run ends.
 
-Claude Code's experimental agent teams work under rig with no extra setup. In the
-default **in-process** backend each teammate shares the lead's process and its tool
-calls already carry an `agent_id`, so the force-delegate hook treats teammates as the
-workers (allows their tools) while the lead stays plan/delegate/review-only.
+This is deliberately not the raw event stream, which is also written (`stream.jsonl`)
+and is what you dig through afterwards. Roughly 80% of what a worker emits is thinking
+tokens; tailing that tells you nothing.
 
-The **terminal backends** (`--teammate-mode tmux|iterm2`) spawn each teammate as a
-separate `claude` process whose hook payloads have no `agent_id` — they would
-otherwise be mistaken for the paid lead and denied every tool. `rig-move-llm run`
-points `CLAUDE_CODE_TEAMMATE_COMMAND` at itself so it can stamp the teammate's
-identity (`RIG_AGENT_ID`, which the hook honors like `agent_id`) and, by default,
-pin the teammate to a cheaper model tier (`--model haiku`). Set
-`RIG_TEAMMATE_MODEL=inherit` to keep the model the lead requested, or
-`RIG_TEAMMATE_MODEL=<name>` to force a specific one. A launcher you set yourself in
-`CLAUDE_CODE_TEAMMATE_COMMAND` is never overwritten.
+## Reading a run
 
-Note the scope honestly: model-pinning selects a cheaper **Anthropic** tier, it does
-not route teammate inference to your worker endpoint — off-quota offload goes through
-`mcp__worker__implement`, not the team path. Teams are interactive-only (headless `-p`
-has no teams), so this path is not exercised by rig's CI smokes; treat it as
-experimental.
+`implement` returns four things and nothing else:
+
+```
+status: finished | killed(<why>) | error: <what>
+log:    <path to this run's directory>
+
+--- diff ---
+<the diff, or its stat plus a path when it is large>
+
+--- last command ---
+<the last shell command the worker ran, and the tail of its output>
+```
+
+`status` describes the **subprocess** — whether it exited on its own or rig killed it, and why. It is a fact from the operating system, not a claim by the worker. There is deliberately no field asserting that the change is correct, complete, or tested: no verdict, no score, no pass/fail. Those are for you to conclude from the diff.
+
+The log directory holds the action log, the raw event stream, the exact command that was run, the task as sent, the full diff, and the tool inventory the worker actually received.
+
+## What changed in 0.8
+
+0.8 removes the enforcement layer and everything built on top of it: the PreToolUse hook that denied the paid agent its editing tools, the deterministic gate on the worker's result, the proof-of-flip retry, the per-turn delegation budget, the tiered return, and the `explore`/`triage`/`show_change` tools. `internal/` went from ~25,400 lines to ~9,400.
+
+The reason is a measurement. On a real task, on a real repo, the worker produced a change that passed the entire test suite — because it had quietly rewritten five existing assertions to match its new behaviour. No gate can catch that: the suite was green, and the suite was the thing that had been edited. A human reading the diff catches it in seconds.
+
+Once the gate cannot be the check, the machinery that existed to feed the gate has no purpose — and that machinery was measured consuming about 74% of the tokens the worker generated and roughly half its wall time. The layer built to make delegation cheap was the most expensive thing in the system.
+
+**Migration:** there is none, and none is needed — `uninstall` cleans up an old install, `init` writes the new one, and a `CLAUDE.md` written by an older rig is upgraded in place. Files you wrote yourself are never touched.
+
+**Removed commands:** `rig hook`, `rig worker` (now `rig thin-worker`, invoked by the MCP config, not by hand), `rig cascade`, `rig teammate-exec`. **Removed config keys:** `RIG_WORKER_ENGINE`, `GATE_MODE`, `VERIFY_CMD`, `RIG_MAX_DELEGATE_ROUNDS`.
+
+## Security posture
+
+The worker subprocess runs with `--dangerously-skip-permissions`: it must edit files and run your tests unattended. Its blast radius is the repo checkout it was pointed at, and its inference is on your endpoint. It runs with every `RIG_*` variable stripped from its environment and with no MCP servers of its own, and it does not load your Claude Code settings — so your hooks, output styles, and agent identity do not follow it in. Web access is denied to it by default.
+
+If that is not an acceptable blast radius for a given repo, do not point rig at that repo.
 
 ## Layout
 
 ```
-cmd/rig-move-llm/   entrypoint
-internal/cli/       subcommand dispatch (serve/hook/init/run/stats)
-internal/service/   OS supervision (launchd / systemd --user / Task Scheduler), stdlib-only
-internal/proxy/     main-leg observability (raw Anthropic passthrough + usage metering)
-internal/worker/    the worker MCP tool (mcp__worker__implement): agentic loop on your endpoint
-internal/hook/      force-delegate + deterministic-gate hooks (Go, no shell)
-internal/config/    layered .env config + backend registry (Ollama first-class)
-pkg/translate/      Anthropic <-> OpenAI translation library (importable, 27 conformance tests)
+cmd/rig-move-llm/   entry point
+internal/cli/       subcommand dispatch (serve / init / doctor / stats / watch / thin-worker)
+internal/thin/      the switch: the MCP server, the spawn, the guards, the kill path
+internal/proxy/     main-leg passthrough + metering, Anthropic<->OpenAI translation, /r/<leg> routing
+internal/config/    layered config (env > project > global)
+internal/service/   OS service install (launchd / systemd)
+internal/stats/     the token ledger
+pkg/translate/      Anthropic <-> OpenAI message translation
 ```
 
 ## Build
 
 ```sh
-go build -o rig-move-llm ./cmd/rig-move-llm     # Go 1.22+: works as-is on all platforms
+go build ./cmd/rig-move-llm
 # Go 1.21 on macOS only (LC_UUID bug): add -ldflags=-linkmode=external && codesign -s - -f rig-move-llm
 ```
 
-Cross-compile is pure-Go (`CGO_ENABLED=0`); CI builds all six targets
-(darwin/linux/windows × amd64/arm64) — see `.github/workflows/build.yml`.
-
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT

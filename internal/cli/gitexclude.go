@@ -11,15 +11,15 @@ import (
 // rigArtifacts are the paths rig itself writes into a project. They are wiring,
 // not the user's work — and two mechanisms had already mistaken them for work:
 // the worker's returned diff listed them as files the worker had authored (#26),
-// and the proof-retry protocol's `git stash -u` would sweep the live hook config
+// and a worker's `git stash -u` would sweep rig's own live config
 // out of the tree mid-round. Excluding them locally fixes both at the source.
 var rigArtifacts = []string{
 	".claude/",
 	".mcp.json",
 	".rig-move-llm/",
-	".gate/",
-	".gate.frozen/",
-	"rig_proof_test.py",
+	// .gate/, .gate.frozen/ and rig_proof_test.py were the contract layer's
+	// artifacts. Nothing writes them any more (S4), so nothing needs excluding —
+	// and an exclude for a file that can no longer exist reads as if it can.
 }
 
 // rigExcludeHeader marks rig's block in .git/info/exclude so a re-run is

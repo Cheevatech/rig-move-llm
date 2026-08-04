@@ -22,7 +22,7 @@ import (
 //
 // It supports both streaming (stream:true — the CC default) and non-streaming
 // requests. There is no escalation to Claude in this prototype; that is the
-// cascade, built only once convergence is proven.
+// escalation path, built only once convergence is proven.
 func (s *Server) handleWorkerRoute(w http.ResponseWriter, r *http.Request, cfg config.Config, project string, body []byte, inboundModel string) {
 	start := time.Now()
 

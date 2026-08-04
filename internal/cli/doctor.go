@@ -1,15 +1,18 @@
 // doctor is the pre-flight ladder as a command. It exists because the ladder
 // already existed as ad-hoc shell one-liners, and every rung of it has burned a
-// measurement: a run that looked healthy while the hook was passing everything
-// through (#22), a worker whose every tool call was denied (#24), a probe that
+// measurement: a run that looked healthy while nothing was being offloaded at all
+// (#22), a worker whose every tool call was denied (#24), and a probe that
 // reported healthy against a key that 401s on every real call (llama-swap answers
-// /v1/models unauthenticated), and a 60-minute round whose gate could not run at
-// all because the toolchain was invisible to the worker (#35).
+// /v1/models unauthenticated).
 //
 // The rule the ladder encodes: never trust a number from rig without proving the
 // mechanism that produced it was live. A rung therefore checks the thing that
-// does the work, not a proxy for it — a real completion rather than /v1/models, a
-// real hook invocation rather than the presence of a settings key.
+// does the work, not a proxy for it — a real completion rather than /v1/models.
+//
+// S4 removed three rungs with the layer they measured (hook-resolvable,
+// hook-fires, gate-toolchain). They are gone rather than kept-and-skipped on
+// purpose: a rung that reports on a mechanism nobody has any more is #22 again,
+// one level up.
 package cli
 
 import (
@@ -25,8 +28,7 @@ import (
 	"time"
 
 	"github.com/Cheevatech/rig-move-llm/internal/config"
-	"github.com/Cheevatech/rig-move-llm/internal/gate"
-	"github.com/Cheevatech/rig-move-llm/internal/worker"
+	"github.com/Cheevatech/rig-move-llm/internal/thin"
 )
 
 // rungStatus is a rung's verdict. skip is not a failure: a rung that does not
@@ -104,10 +106,9 @@ const doctorTimeout = 90 * time.Second
 func cmdDoctor(args []string) int {
 	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
 		fmt.Println("Usage: rig-move-llm doctor [--json]\n\n" +
-			"Proves the offload rig is live before you trust a measurement: config, worker\n" +
-			"endpoint (authenticated), cc engine, workspace trust, hooks (actually firing),\n" +
-			"the repo's gate toolchain as the WORKER sees it, the effective guards, and\n" +
-			"whether the MAIN leg has credentials to open a session at all.\n" +
+			"Proves the switch is live before you trust a measurement: config, worker\n" +
+			"endpoint (authenticated), the switch itself, workspace trust, the effective\n" +
+			"guards, and whether the MAIN leg has credentials to open a session at all.\n" +
 			"  --json  Output results as a single JSON object on stdout\n" +
 			"Exits non-zero if any rung failed.")
 		return 0
@@ -126,11 +127,9 @@ func cmdDoctor(args []string) int {
 	rungs := []rung{
 		checkConfig(cfg),
 		checkWorkerEndpoint(cfg),
-		checkCCEngine(cfg),
+		checkSwitch(cfg),
 		checkWorkspaceTrust(cwd),
-		checkHookResolvable(),
-		checkHookLive(),
-		checkGateToolchain(cwd),
+		checkWorkerCommand(),
 		checkGuards(),
 		checkMainAuth(),
 	}
@@ -196,28 +195,11 @@ func checkConfig(cfg config.Config) rung {
 			"run `rig-move-llm setup` (or set WORKER_API_BASE in config.env)")
 	}
 	if !cfg.Enabled {
-		return fail(name, "ENABLED=false — the hook passes every tool through and nothing is delegated",
+		return fail(name, "ENABLED=false — nothing is wired up to offload to",
 			"run `rig-move-llm enable`")
 	}
-	return pass(name, fmt.Sprintf("ENABLED, worker=%s model=%s engine=%s",
-		cfg.WorkerAPIBase, cfg.WorkerModel, engineName(cfg)))
-}
-
-// engineName reports which engine implement will actually use, mirroring the
-// selection rule in the worker package (cc when RIG_CC_BASE_URL is set and the
-// engine is unset).
-func engineName(cfg config.Config) string {
-	switch strings.TrimSpace(cfg.WorkerEngine) {
-	case "cc":
-		return "cc"
-	case "":
-		if strings.TrimSpace(cfg.CCBaseURL) != "" {
-			return "cc"
-		}
-		return "loop"
-	default:
-		return "loop"
-	}
+	return pass(name, fmt.Sprintf("ENABLED, worker=%s model=%s",
+		cfg.WorkerAPIBase, cfg.WorkerModel))
 }
 
 // --- rung 2: worker endpoint, authenticated -------------------------------
@@ -255,16 +237,18 @@ func checkWorkerEndpoint(cfg config.Config) rung {
 	return pass(name, "a real completion succeeded (not just /v1/models)")
 }
 
-// --- rung 3: cc engine ----------------------------------------------------
+// --- rung 3: the switch ---------------------------------------------------
 
-func checkCCEngine(cfg config.Config) rung {
-	const name = "cc engine"
-	if engineName(cfg) != "cc" {
-		return skip(name, "loop engine configured — nothing to check")
-	}
+// checkSwitch proves the one mechanism rig still has: a `claude -p` subprocess
+// that can be pointed at the local model. There is no engine choice left to
+// report — the loop engine and the contract layer it served were deleted in S4 —
+// so this rung is unconditional. A skip here would be a lie about the only thing
+// the product does.
+func checkSwitch(cfg config.Config) rung {
+	const name = "switch"
 	base := strings.TrimSpace(cfg.CCBaseURL)
 	if base == "" {
-		return fail(name, "RIG_WORKER_ENGINE=cc but RIG_CC_BASE_URL is empty — the engine refuses to run rather than bill the worker leg to your account",
+		return fail(name, "RIG_CC_BASE_URL is empty — the switch refuses to run rather than bill the worker leg to your account",
 			"point RIG_CC_BASE_URL at an Anthropic-format endpoint for the worker model (rig serves one at /r/worker)")
 	}
 	bin := strings.TrimSpace(os.Getenv("RIG_CC_BIN"))
@@ -272,7 +256,7 @@ func checkCCEngine(cfg config.Config) rung {
 		bin = "claude"
 	}
 	if _, err := exec.LookPath(bin); err != nil {
-		return fail(name, "the cc engine runs `"+bin+"` as a subprocess and it is not on PATH",
+		return fail(name, "the switch runs `"+bin+"` as a subprocess and it is not on PATH",
 			"install the claude CLI, or set RIG_CC_BIN to its absolute path")
 	}
 
@@ -308,7 +292,7 @@ func checkWorkspaceTrust(cwd string) rung {
 		return fail(name, "cannot resolve the working directory", "run doctor from inside the project")
 	}
 	if !workspaceTrusted(cwd) {
-		return fail(name, "Claude Code does not trust "+cwd+" — it will not load rig's hooks or MCP server here",
+		return fail(name, "Claude Code does not trust "+cwd+" — it will not load rig's MCP server here",
 			"run `rig-move-llm init --trust-workspace`, or open the dir in Claude Code once and accept the prompt")
 	}
 	return pass(name, "granted for "+cwd)
@@ -335,248 +319,96 @@ func getSettingsPaths(repo, home string) []string {
 	return paths
 }
 
-// --- rung 5: rig hook commands are resolvable on PATH ----------------------
+// --- rung 5: the command the MCP entry names is resolvable ----------------
 
-// checkHookResolvable ensures the hook commands configured in settings.json
-// can actually be found as executables. The hook-live rung invokes the rig
-// binary directly via os.Executable(), so it passes even when the configured
-// hook command (the string in settings.json) is not on PATH. This rung catches
-// the "nothing was delegated" state: hooks wired with a command that doesn't
-// resolve, or no rig hooks at all.
-func checkHookResolvable() rung {
-	cwd, _ := os.Getwd()
-	home, _ := os.UserHomeDir()
-	return checkHookResolvableIn(cwd, home)
-}
-
-func checkHookResolvableIn(repo, home string) rung {
-	const name = "hook resolvable"
-
-	settingsPaths := getSettingsPaths(repo, home)
-
-	var rigCommands []struct {
-		cmd  string
-		file string
+// checkWorkerCommand asks whether the thing rig told Claude Code to launch can
+// actually be launched. The MCP entry names `rig-move-llm` (or npx), and Claude
+// Code resolves it from the PATH of whatever started it — so an install can be
+// complete in every visible way and still never start a worker.
+//
+// Measured 2026-08-04 on a real machine: `init --global` wrote a correct
+// registration, and the session reported `worker: failed` with no
+// mcp__worker__implement anywhere, because the binary had never been put on
+// PATH. Nothing said so. The old ladder had a rung for exactly this shape, aimed
+// at the hook command; S4 deleted it along with the hooks instead of repointing
+// it at the command that survived, so this rung is that one, restored to the
+// surface rig actually has.
+func checkWorkerCommand() rung {
+	const name = "worker command"
+	cmd, source := workerMCPCommand()
+	if cmd == "" {
+		return skip(name, "no MCP registration found — run `rig-move-llm init`")
 	}
-	for _, sp := range settingsPaths {
-		data, err := os.ReadFile(sp)
-		if err != nil {
-			continue
+	if cmd == "npx" {
+		// npx resolves the package at spawn time; the only thing to check here is
+		// that npx itself exists.
+		if p, err := exec.LookPath("npx"); err == nil {
+			return pass(name, "npx found at "+p+" (worker spawned via npx, from "+source+")")
 		}
-		var settings map[string]any
-		if json.Unmarshal(data, &settings) != nil {
-			continue
-		}
-		hooks, ok := settings["hooks"].(map[string]any)
-		if !ok {
-			continue
-		}
-		for _, entriesAny := range hooks {
-			entries, ok := entriesAny.([]any)
-			if !ok {
-				continue
-			}
-			for _, e := range entries {
-				m, ok := e.(map[string]any)
-				if !ok {
-					continue
-				}
-				inner, ok := m["hooks"].([]any)
-				if !ok {
-					continue
-				}
-				for _, h := range inner {
-					hm, ok := h.(map[string]any)
-					if !ok {
-						continue
-					}
-					cmd, ok := hm["command"].(string)
-					if !ok {
-						continue
-					}
-					if commandMentionsRig(cmd) {
-						rigCommands = append(rigCommands, struct {
-							cmd  string
-							file string
-						}{cmd: cmd, file: sp})
-					}
-				}
-			}
-		}
+		return fail(name, "the registration in "+source+" spawns the worker with npx, and npx is not on PATH",
+			"install Node, or re-run `rig-move-llm init` without --npx after installing the binary globally")
 	}
-
-	if len(rigCommands) == 0 {
+	p, err := exec.LookPath(cmd)
+	if err != nil {
 		return fail(name,
-			"no rig-move-llm hook commands found in any settings file — the offload rig has nothing to delegate through",
-			"run `rig-move-llm init` to wire the hooks into .claude/settings.json")
+			fmt.Sprintf("%s registers the worker as %q, and that is NOT on PATH — Claude Code reports the server as `failed` and no mcp__worker__implement tool exists, so nothing can be delegated", source, cmd),
+			"install it globally (`npm i -g rig-move-llm`), or put the binary on the PATH of whatever launches Claude Code")
 	}
-
-	for _, rc := range rigCommands {
-		// Simple field split — this does not handle complex shell quoting, but
-		// rig's own hook commands never use quotes, and this is a diagnostic,
-		// not a shell.
-		words := strings.Fields(rc.cmd)
-		if len(words) == 0 {
-			continue
-		}
-		cmdWord := words[0]
-		if !resolveCommand(cmdWord) {
-			return fail(name,
-				fmt.Sprintf("command %q (in %s) cannot be resolved as an executable", rc.cmd, rc.file),
-				"ensure the binary is installed and on PATH, or run `rig-move-llm init` to repair the hook wiring")
-		}
-	}
-
-	return pass(name, fmt.Sprintf("%d rig hook command(s) resolve to executables", len(rigCommands)))
+	return pass(name, fmt.Sprintf("%s found at %s (registered in %s)", cmd, p, source))
 }
 
-// resolveCommand checks whether a command word can be found as an executable.
-// If it contains a "/" it is treated as a path (absolute or relative to cwd);
-// otherwise it is looked up on PATH.
-func resolveCommand(cmdWord string) bool {
-	if strings.Contains(cmdWord, "/") {
-		// Treat as a path: absolute or relative to cwd.
-		if !filepath.IsAbs(cmdWord) {
-			cwd, _ := os.Getwd()
-			cmdWord = filepath.Join(cwd, cmdWord)
-		}
-		st, err := os.Stat(cmdWord)
-		if err != nil {
-			return false
-		}
-		if st.IsDir() {
-			return false
-		}
-		return st.Mode()&0o111 != 0
+// workerMCPCommand reads back the registration rig actually wrote, rather than
+// assuming what it would have written: the point of the rung is to check the
+// file on disk, which may be from an older install or hand-edited.
+func workerMCPCommand() (cmd, source string) {
+	type entry struct {
+		Command string `json:"command"`
 	}
-
-	// Bare name: look it up on PATH.
-	path := os.Getenv("PATH")
-	if path == "" {
-		return false
-	}
-	for _, dir := range filepath.SplitList(path) {
-		candidate := filepath.Join(dir, cmdWord)
-		st, err := os.Stat(candidate)
-		if err != nil {
-			continue
+	// Project scope first — a project-root .mcp.json wins for this directory.
+	if data, err := os.ReadFile(".mcp.json"); err == nil {
+		var f struct {
+			MCPServers map[string]entry `json:"mcpServers"`
 		}
-		if st.IsDir() {
-			continue
-		}
-		if st.Mode()&0o111 != 0 {
-			return true
+		if json.Unmarshal(data, &f) == nil {
+			if e, ok := f.MCPServers["worker"]; ok && e.Command != "" {
+				return e.Command, ".mcp.json"
+			}
 		}
 	}
-	return false
+	if data, err := os.ReadFile(userClaudeJSON()); err == nil {
+		var f struct {
+			MCPServers map[string]entry `json:"mcpServers"`
+		}
+		if json.Unmarshal(data, &f) == nil {
+			if e, ok := f.MCPServers["worker"]; ok && e.Command != "" {
+				return e.Command, "~/.claude.json (user scope)"
+			}
+		}
+	}
+	return "", ""
 }
 
-// --- rung 6: the hook actually fires --------------------------------------
+// --- rung 6: the guards ---------------------------------------------------
 
-// checkHookLive feeds a MAIN Bash payload through rig's own hook and requires a
-// deny. The presence of hook entries in .claude/settings.json proves nothing:
-// #22 was a session where the hooks were wired, the config was right, and every
-// tool passed through anyway because a failed health probe put the hook in
-// passthrough for the whole run. What the measurement needed was a deny it could
-// see.
-func checkHookLive() rung {
-	const name = "hook live"
-	self, err := os.Executable()
-	if err != nil {
-		return fail(name, "cannot locate the rig binary to invoke: "+err.Error(), "reinstall rig-move-llm")
-	}
-	cmd := exec.Command(self, "hook", "pre-tool")
-	cmd.Stdin = strings.NewReader(`{"tool_name":"Bash","tool_input":{"command":"echo doctor"}}`)
-	out, err := cmd.Output()
-	if err != nil {
-		return fail(name, "the pre-tool hook errored: "+err.Error(), "run `rig-move-llm init` to rewire the hooks")
-	}
-
-	var decision struct {
-		HookSpecificOutput struct {
-			PermissionDecision string `json:"permissionDecision"`
-		} `json:"hookSpecificOutput"`
-	}
-	if json.Unmarshal(out, &decision) != nil {
-		return fail(name, "the pre-tool hook returned output this version does not understand",
-			"upgrade rig-move-llm and re-run `rig-move-llm init`")
-	}
-	if decision.HookSpecificOutput.PermissionDecision != "deny" {
-		return fail(name, "a MAIN Bash call was NOT denied — the hook is in passthrough, so nothing is being delegated and any measurement is of plain Claude Code",
-			"check the other rungs first (a down worker endpoint puts the hook in passthrough by design), then `rig-move-llm init`")
-	}
-	return pass(name, "a MAIN Bash call was denied, as it must be")
-}
-
-// --- rung 6: the gate toolchain, as the WORKER sees it (#35) --------------
-
-// checkGateToolchain is #35. The worker inherits its PATH from the process that
-// spawns it, so a toolchain that is installed but not on THIS PATH does not exist
-// as far as the worker is concerned — and a worker that cannot run the repo's
-// gate cannot produce evidence, only claims.
+// checkGuards reports the two ceilings rather than judging them: silence, then
+// total wall, then the per-call timeout rig declares to the client. The ladder
+// must hold or a run is killed by someone who cannot explain why — the client
+// aborting first means the caller gets a bare protocol error instead of a
+// diagnosis and the partial diff.
 //
-// Measured (map13 task12): `go` was installed at ~/go/bin/go and invisible to the
-// worker, which fell back to a stray pytest run reporting "3 passed" for a Go
-// change and shipped 1157 lines that had never compiled. 60 minutes gated on
-// nothing. The failure mode was not "no toolchain" but "toolchain not visible to
-// the worker", so a rung that only asks "is it installed somewhere?" would have
-// passed and taught us nothing.
-// The table it reads lives in internal/gate, which the worker engine reads too
-// (#59). Two copies of it is how this rung would end up blessing a shape the
-// worker cannot gate.
-//
-// A repo whose shape rig does not recognise SKIPs rather than fails: since #59
-// the engine has a last-resort fallback doctor cannot see from here — the gate
-// command the worker itself runs in the repo — so "no marker" no longer means
-// "no gate", and reporting it as a failure would be a lie.
-func checkGateToolchain(cwd string) rung {
-	const name = "gate toolchain"
-	tool, ok := gate.DetectGateTool(cwd)
-	if !ok {
-		return skip(name, "no recognised project shape here — rig cannot infer the gate command up front; "+
-			"the engine falls back to whatever gate command the worker runs in the repo")
-	}
-	if p, found := tool.Available(cwd, exec.LookPath); found {
-		return pass(name, fmt.Sprintf("%s found at %s (gate: %s)", tool.Cmd, p, tool.Verify))
-	}
-	if tool.InRepo {
-		// A repo-local wrapper that is present but not executable — a real and
-		// silent failure mode of a fresh clone on a filesystem that drops the bit.
-		return fail(name, fmt.Sprintf("%s (%s) declares the gate `%s`, but %s is not an executable file in the repo",
-			tool.Marker, cwd, tool.Verify, tool.Cmd),
-			"chmod +x "+tool.Cmd+" in "+cwd)
-	}
-	detail := fmt.Sprintf("%s (%s) declares a %s project, but `%s` is NOT on the PATH the worker inherits — it cannot run `%s`, so it cannot prove anything it changes",
-		tool.Marker, cwd, tool.Cmd, tool.Cmd, tool.Verify)
-	if found := gate.FindOffPath(tool, cwd); found != "" {
-		return fail(name, detail+"; it IS installed at "+found,
-			"add "+filepath.Dir(found)+" to PATH in the environment that launches Claude Code (a non-interactive shell does not read your profile)")
-	}
-	return fail(name, detail, "install "+tool.Cmd+" and make sure it is on PATH for the process that launches Claude Code")
-}
-
-// --- rung 7: the guards ---------------------------------------------------
-
-// checkGuards reports the ladder rather than judging it: stall < wall < ceiling
-// < the per-call timeout rig declares to the client (#33, #57). Ordering is
-// enforced by tests in the worker package; what a user needs here is the
-// effective numbers and where each came from, because an env override is
-// invisible in config.env. The gate credit is printed next to the wall because
-// it is the difference between the two: the wall budgets WORKING time, and the
-// ceiling is what that can grow to once gate time is excused.
+// Two numbers that used to be here are gone with the layer that needed them:
+// the gate credit (there is no gate to excuse time for) and the per-turn
+// delegation budget (nothing counts rounds any more).
 func checkGuards() rung {
 	const name = "guards"
-	stall, wall := worker.StallGuard(), worker.WallGuard()
-	credit, ceiling, client := worker.GateCredit(), worker.WallCeiling(), worker.ClientCallTimeout()
-	detail := fmt.Sprintf("stall %s%s < wall %s%s (+%s gate credit%s) < ceiling %s < client %s; delegation budget %d/turn%s",
-		stall, envSource("RIG_CC_STALL_TIMEOUT"),
-		wall, envSource("RIG_WORKER_RUN_TIMEOUT"),
-		credit, envSource("RIG_WORKER_GATE_CREDIT"),
-		ceiling, client,
-		maxDelegateRounds(), envSource("RIG_MAX_DELEGATE_ROUNDS"))
-	if stall >= wall || wall > ceiling || ceiling >= client {
+	stall, wall, client := thin.StallCeiling(), thin.WallCeiling(), thin.ClientCallTimeout()
+	detail := fmt.Sprintf("stall %s%s < wall %s%s < client %s",
+		stall, envSource("RIG_THIN_STALL"),
+		wall, envSource("RIG_THIN_WALL"),
+		client)
+	if stall >= wall || wall >= client {
 		return fail(name, detail,
-			"restore the ordering stall < wall <= ceiling < client, or the round is killed by someone who cannot explain why")
+			"restore the ordering stall < wall < client, or the run is killed by someone who cannot explain why")
 	}
 	return pass(name, detail)
 }
@@ -590,10 +422,10 @@ func envSource(key string) string {
 	return ""
 }
 
-// --- rung 8: the MAIN leg can start a session at all ----------------------
+// --- rung 7: the MAIN leg can start a session at all ----------------------
 
-// checkMainAuth is the hole the other seven rungs left open. Measured
-// 2026-07-30: an install answered all-7-PASS in a HOME where `claude` had never
+// checkMainAuth is the hole the other rungs left open. Measured
+// 2026-07-30: an install answered all-PASS in a HOME where `claude` had never
 // been logged in — the worker leg rides a dummy key against the local endpoint
 // (auth hygiene, by design), so nothing below this rung touches the paid
 // identity, and doctor happily blessed an install that could not open a MAIN

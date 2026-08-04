@@ -62,18 +62,10 @@ func cmdRun(args []string) int {
 	cmd := exec.Command(launch[0], launch[1:]...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	// No subagent-model pin: on CC 2.1.214 native subagents run in-process and
-	// never reach the base-URL proxy, so pinning them was a no-op. Offload is now
-	// the worker MCP tool (ticket P9); MAIN is steered to it by the force-delegate
-	// hook, which denies subagent spawns outright.
+	// never reach the base-URL proxy, so pinning them was a no-op. Offload is the
+	// worker MCP tool (ticket P9); MAIN is steered to it by the CLAUDE.md rig
+	// writes, and steered is all it is — nothing denies anything.
 	cmd.Env = append(os.Environ(), "ANTHROPIC_BASE_URL="+baseURL)
-	// Terminal-backend agent teams (tmux/iterm2) spawn each teammate as a fresh
-	// claude with no agent_id in its hook payloads; point their launcher at us so
-	// teammate-exec can stamp the identity + worker-tier model. The default
-	// in-process backend ignores this (its teammates already carry agent_id). A
-	// user-set value wins — we never clobber a launcher they configured.
-	if self, err := os.Executable(); err == nil && os.Getenv("CLAUDE_CODE_TEAMMATE_COMMAND") == "" {
-		cmd.Env = append(cmd.Env, "CLAUDE_CODE_TEAMMATE_COMMAND="+self)
-	}
 	if err := cmd.Run(); err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
 			return ee.ExitCode()

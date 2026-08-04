@@ -10,163 +10,13 @@ import (
 	"testing"
 
 	"github.com/Cheevatech/rig-move-llm/internal/config"
-	"github.com/Cheevatech/rig-move-llm/internal/worker"
+	"github.com/Cheevatech/rig-move-llm/internal/thin"
 )
 
 // The rung that #35 is about. The failure it exists to catch is NOT "no
 // toolchain" — it is "toolchain installed, invisible to the worker", which is what
 // burned task12: go lived at ~/go/bin/go, the worker inherited a PATH without it,
 // ran a stray pytest instead, and shipped 1157 lines that had never compiled.
-func TestGateToolchainRung(t *testing.T) {
-	t.Run("on PATH passes and names the resolved binary", func(t *testing.T) {
-		repo := t.TempDir()
-		mustWrite(t, filepath.Join(repo, "go.mod"), "module x\n")
-		bin := t.TempDir()
-		fake := filepath.Join(bin, "go")
-		mustWrite(t, fake, "#!/bin/sh\n")
-		if err := os.Chmod(fake, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		t.Setenv("PATH", bin)
-
-		r := checkGateToolchain(repo)
-
-		if r.status != rungPass {
-			t.Fatalf("status = %s, want PASS (%s)", r.status.label(), r.detail)
-		}
-		if !strings.Contains(r.detail, fake) {
-			t.Errorf("detail should name the resolved binary %q:\n%s", fake, r.detail)
-		}
-	})
-
-	// The task12 shape: the toolchain IS installed, PATH just does not carry it.
-	// Cargo's search list is home-relative only, so an overridden HOME keeps this
-	// hermetic on a machine that really has a toolchain in /usr/local.
-	t.Run("installed but off PATH fails and names the dir to add", func(t *testing.T) {
-		repo := t.TempDir()
-		mustWrite(t, filepath.Join(repo, "Cargo.toml"), "[package]\n")
-
-		home := t.TempDir()
-		cargoBin := filepath.Join(home, ".cargo", "bin")
-		if err := os.MkdirAll(cargoBin, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		installed := filepath.Join(cargoBin, "cargo")
-		mustWrite(t, installed, "#!/bin/sh\n")
-		if err := os.Chmod(installed, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		t.Setenv("HOME", home)
-		t.Setenv("PATH", t.TempDir())
-
-		r := checkGateToolchain(repo)
-
-		if r.status != rungFail {
-			t.Fatalf("status = %s, want FAIL (%s)", r.status.label(), r.detail)
-		}
-		for _, want := range []string{"NOT on the PATH the worker inherits", "IS installed at", installed} {
-			if !strings.Contains(r.detail, want) {
-				t.Errorf("detail missing %q:\n%s", want, r.detail)
-			}
-		}
-		if !strings.Contains(r.fix, cargoBin) {
-			t.Errorf("fix must name the directory to add (%s):\n%s", cargoBin, r.fix)
-		}
-	})
-
-	// A project-local venv is searched relative to the REPO, not to wherever
-	// doctor was invoked from.
-	t.Run("a project-local venv is found relative to the repo", func(t *testing.T) {
-		repo := t.TempDir()
-		mustWrite(t, filepath.Join(repo, "pyproject.toml"), "[project]\n")
-		venv := filepath.Join(repo, ".venv", "bin")
-		if err := os.MkdirAll(venv, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		installed := filepath.Join(venv, "pytest")
-		mustWrite(t, installed, "#!/bin/sh\n")
-		if err := os.Chmod(installed, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		t.Setenv("HOME", t.TempDir())
-		t.Setenv("PATH", t.TempDir())
-
-		if r := checkGateToolchain(repo); !strings.Contains(r.detail, installed) {
-			t.Errorf("detail should name the repo-local venv binary %q:\n%s", installed, r.detail)
-		}
-	})
-
-	t.Run("missing entirely fails with an install fix", func(t *testing.T) {
-		repo := t.TempDir()
-		mustWrite(t, filepath.Join(repo, "pyproject.toml"), "[project]\n")
-		t.Setenv("HOME", t.TempDir())
-		t.Setenv("PATH", t.TempDir())
-
-		r := checkGateToolchain(repo)
-
-		if r.status != rungFail {
-			t.Fatalf("status = %s, want FAIL", r.status.label())
-		}
-		if !strings.Contains(r.detail, "pytest") || !strings.Contains(r.fix, "install pytest") {
-			t.Errorf("want a pytest-specific diagnosis and fix, got %q / %q", r.detail, r.fix)
-		}
-	})
-
-	t.Run("an unrecognised project shape skips rather than failing", func(t *testing.T) {
-		if r := checkGateToolchain(t.TempDir()); r.status != rungSkip {
-			t.Errorf("status = %s, want SKIP — rig must not invent a gate it cannot infer", r.status.label())
-		}
-	})
-
-	// The rung reads internal/gate, the same table the worker engine runs from
-	// (#59). It used to keep its own byte-identical copy, and the day the two
-	// drifted this rung would bless a shape the worker cannot actually gate. An
-	// ecosystem that exists in only one of the two copies proves which one this
-	// reads.
-	t.Run("it reads the shared table, not a private copy", func(t *testing.T) {
-		repo := t.TempDir()
-		mustWrite(t, filepath.Join(repo, "mix.exs"), "defmodule X do\nend\n")
-		t.Setenv("HOME", t.TempDir())
-		t.Setenv("PATH", t.TempDir())
-
-		r := checkGateToolchain(repo)
-
-		if r.status == rungSkip {
-			t.Fatal("an Elixir repo is a recognised shape in internal/gate — this rung is reading something else")
-		}
-		if !strings.Contains(r.detail, "mix test") {
-			t.Errorf("detail should name the shared table's gate command:\n%s", r.detail)
-		}
-	})
-
-	// A wrapper is in the repo, so PATH is the wrong question — asking it
-	// reported a missing toolchain for every Gradle/Maven-wrapper repo there is.
-	t.Run("a repo-local wrapper is not looked for on PATH", func(t *testing.T) {
-		repo := t.TempDir()
-		mustWrite(t, filepath.Join(repo, "build.gradle"), "")
-		wrapper := filepath.Join(repo, "gradlew")
-		mustWrite(t, wrapper, "#!/bin/sh\n")
-		if err := os.Chmod(wrapper, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		t.Setenv("HOME", t.TempDir())
-		t.Setenv("PATH", t.TempDir())
-
-		r := checkGateToolchain(repo)
-
-		if r.status != rungPass {
-			t.Fatalf("status = %s, want PASS — the wrapper is right there (%s)", r.status.label(), r.detail)
-		}
-		if !strings.Contains(r.detail, "./gradlew test") {
-			t.Errorf("detail should name the wrapper gate:\n%s", r.detail)
-		}
-	})
-}
-
-// The lesson from the mangled worker key: /v1/models answered 200 unauthenticated
-// while every real call 401'd, so the health probe reported a healthy rig that
-// could not do any work. This rung must call the endpoint that does the work, and
-// must separate AUTH from unreachable.
 func TestWorkerEndpointRung(t *testing.T) {
 	t.Run("a real completion passes", func(t *testing.T) {
 		var hit string
@@ -224,7 +74,7 @@ func TestConfigRung(t *testing.T) {
 	}
 	// ENABLED=false is the #22 shape: everything wired, nothing delegated.
 	r := checkConfig(config.Config{WorkerAPIBase: "http://x/v1", Enabled: false})
-	if r.status != rungFail || !strings.Contains(r.detail, "passes every tool through") {
+	if r.status != rungFail || !strings.Contains(r.detail, "nothing is wired up") {
 		t.Errorf("ENABLED=false must FAIL and say why, got %s / %s", r.status.label(), r.detail)
 	}
 	if r := checkConfig(config.Config{WorkerAPIBase: "http://x/v1", WorkerModel: "m", Enabled: true}); r.status != rungPass {
@@ -232,23 +82,19 @@ func TestConfigRung(t *testing.T) {
 	}
 }
 
-// The cc engine's own refusal rule (never bill the worker leg to the paid
-// account) has to be visible as a rung, not discovered when a round dies.
-func TestCCEngineRung(t *testing.T) {
-	t.Run("loop engine skips", func(t *testing.T) {
-		if r := checkCCEngine(config.Config{WorkerEngine: "loop"}); r.status != rungSkip {
-			t.Errorf("status = %s, want SKIP", r.status.label())
-		}
-	})
-
-	t.Run("cc without a base URL fails", func(t *testing.T) {
-		r := checkCCEngine(config.Config{WorkerEngine: "cc"})
+// The switch's own refusal rule (never bill the worker leg to the paid account)
+// has to be visible as a rung, not discovered when a run dies. It is
+// unconditional now: there is no second engine to skip in favour of, and a SKIP
+// here would be a lie about the only thing the product does.
+func TestSwitchRung(t *testing.T) {
+	t.Run("no base URL fails", func(t *testing.T) {
+		r := checkSwitch(config.Config{})
 		if r.status != rungFail || !strings.Contains(r.detail, "RIG_CC_BASE_URL") {
 			t.Errorf("want a base-URL diagnosis, got %s / %s", r.status.label(), r.detail)
 		}
 	})
 
-	t.Run("cc with an anthropic-format endpoint passes", func(t *testing.T) {
+	t.Run("an anthropic-format endpoint passes", func(t *testing.T) {
 		var hit string
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			hit = r.URL.Path
@@ -264,7 +110,7 @@ func TestCCEngineRung(t *testing.T) {
 		}
 		t.Setenv("PATH", bin)
 
-		r := checkCCEngine(config.Config{WorkerEngine: "cc", CCBaseURL: srv.URL, CCModel: "qwen"})
+		r := checkSwitch(config.Config{CCBaseURL: srv.URL, CCModel: "qwen"})
 
 		if r.status != rungPass {
 			t.Fatalf("status = %s, want PASS (%s)", r.status.label(), r.detail)
@@ -276,9 +122,9 @@ func TestCCEngineRung(t *testing.T) {
 
 	t.Run("a missing claude CLI fails", func(t *testing.T) {
 		t.Setenv("PATH", t.TempDir())
-		r := checkCCEngine(config.Config{WorkerEngine: "cc", CCBaseURL: "http://127.0.0.1:1"})
+		r := checkSwitch(config.Config{CCBaseURL: "http://127.0.0.1:1"})
 		if r.status != rungFail || !strings.Contains(r.detail, "not on PATH") {
-			t.Errorf("want a PATH diagnosis for the cc subprocess, got %s / %s", r.status.label(), r.detail)
+			t.Errorf("want a PATH diagnosis for the subprocess, got %s / %s", r.status.label(), r.detail)
 		}
 	})
 }
@@ -291,8 +137,8 @@ func TestGuardsRung(t *testing.T) {
 		if r.status != rungPass {
 			t.Fatalf("status = %s, want PASS (%s)", r.status.label(), r.detail)
 		}
-		for _, want := range []string{worker.StallGuard().String(), worker.WallGuard().String(),
-			worker.GateCredit().String(), worker.WallCeiling().String(), worker.ClientCallTimeout().String(), "budget"} {
+		for _, want := range []string{thin.StallCeiling().String(), thin.WallCeiling().String(),
+			thin.ClientCallTimeout().String()} {
 			if !strings.Contains(r.detail, want) {
 				t.Errorf("detail missing %q:\n%s", want, r.detail)
 			}
@@ -300,8 +146,8 @@ func TestGuardsRung(t *testing.T) {
 	})
 
 	t.Run("an override is named, not silent", func(t *testing.T) {
-		t.Setenv("RIG_WORKER_RUN_TIMEOUT", "2000")
-		if r := checkGuards(); !strings.Contains(r.detail, "env RIG_WORKER_RUN_TIMEOUT=2000") {
+		t.Setenv("RIG_THIN_WALL", "2000")
+		if r := checkGuards(); !strings.Contains(r.detail, "env RIG_THIN_WALL=2000") {
 			t.Errorf("an env override must be visible in the report:\n%s", r.detail)
 		}
 	})
@@ -309,14 +155,14 @@ func TestGuardsRung(t *testing.T) {
 	t.Run("a broken ladder fails", func(t *testing.T) {
 		// A wall below the stall guard means the round dies without the stall
 		// diagnosis ever being reachable.
-		t.Setenv("RIG_WORKER_RUN_TIMEOUT", "60")
+		t.Setenv("RIG_THIN_WALL", "60")
 		if r := checkGuards(); r.status != rungFail {
 			t.Errorf("status = %s, want FAIL for stall >= wall", r.status.label())
 		}
 	})
 }
 
-// The all-7-PASS install that could not delegate: the worker leg runs on a dummy
+// The all-PASS install that could not delegate: the worker leg runs on a dummy
 // key against the local endpoint, so no other rung ever touches the paid
 // identity, and a HOME with no login looked perfectly healthy.
 func TestMainAuthRung(t *testing.T) {
@@ -522,256 +368,111 @@ func TestRungStatusJSONTag(t *testing.T) {
 		t.Errorf("rungSkip.jsonTag() = %q, want \"skip\"", rungSkip.jsonTag())
 	}
 }
-func TestHookResolvableRung(t *testing.T) {
-	setHome := func(t *testing.T) string {
+
+// The rung that would have caught a real install failing silently: `init
+// --global` wrote a correct registration on a machine where the binary had
+// never been put on PATH, and the session reported `worker: failed` with no
+// mcp__worker__implement anywhere. Nothing said so — the old ladder had a rung
+// for this shape aimed at the hook command, and S4 deleted it with the hooks
+// instead of repointing it at the command that survived.
+func TestWorkerCommandRung(t *testing.T) {
+	// Run each case in its own directory so a stray .mcp.json cannot leak in.
+	inDir := func(t *testing.T, f func(t *testing.T)) {
 		t.Helper()
-		home := t.TempDir()
-		t.Setenv("HOME", home)
-		return home
+		wd, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chdir(t.TempDir()); err != nil {
+			t.Fatal(err)
+		}
+		defer os.Chdir(wd)
+		f(t)
 	}
 
-	t.Run("resolvable command passes", func(t *testing.T) {
-		home := setHome(t)
-		repo := t.TempDir()
-		claudeDir := filepath.Join(repo, ".claude")
-		if err := os.MkdirAll(claudeDir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-
-		bin := t.TempDir()
-		fake := filepath.Join(bin, "rig-move-llm")
-		mustWrite(t, fake, "#!/bin/sh\necho ok\n")
-		if err := os.Chmod(fake, 0o755); err != nil {
-			t.Fatal(err)
-		}
-
-		settings := map[string]any{
-			"hooks": map[string]any{
-				"PreToolUse": []any{map[string]any{
-					"matcher": "*",
-					"hooks": []any{
-						map[string]any{"type": "command", "command": fake + " hook pre-tool"},
-					},
-				}},
-			},
-		}
-		settingsJSON, _ := json.MarshalIndent(settings, "", "  ")
-		mustWrite(t, filepath.Join(claudeDir, "settings.json"), string(settingsJSON))
-
-		r := checkHookResolvableIn(repo, home)
-		if r.status != rungPass {
-			t.Fatalf("status = %s, want PASS (%s)", r.status.label(), r.detail)
-		}
+	t.Run("no registration anywhere is a skip, not a failure", func(t *testing.T) {
+		inDir(t, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			if r := checkWorkerCommand(); r.status != rungSkip {
+				t.Errorf("status = %s, want SKIP (%s)", r.status.label(), r.detail)
+			}
+		})
 	})
 
-	t.Run("unresolvable command fails with command and file named", func(t *testing.T) {
-		home := setHome(t)
-		repo := t.TempDir()
-		claudeDir := filepath.Join(repo, ".claude")
-		if err := os.MkdirAll(claudeDir, 0o755); err != nil {
-			t.Fatal(err)
-		}
+	t.Run("a registered command that is not on PATH fails loudly", func(t *testing.T) {
+		inDir(t, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			mustWrite(t, filepath.Join(home, ".claude.json"),
+				`{"mcpServers":{"worker":{"command":"rig-move-llm","args":["thin-worker"]}}}`)
+			t.Setenv("PATH", t.TempDir())
 
-		settings := map[string]any{
-			"hooks": map[string]any{
-				"PreToolUse": []any{map[string]any{
-					"matcher": "*",
-					"hooks": []any{
-						map[string]any{"type": "command", "command": "rig-move-llm-does-not-exist --hook"},
-					},
-				}},
-			},
-		}
-		settingsJSON, _ := json.MarshalIndent(settings, "", "  ")
-		settingsPath := filepath.Join(claudeDir, "settings.json")
-		mustWrite(t, settingsPath, string(settingsJSON))
-
-		r := checkHookResolvableIn(repo, home)
-
-		if r.status != rungFail {
-			t.Fatalf("status = %s, want FAIL (%s)", r.status.label(), r.detail)
-		}
-		if !strings.Contains(r.detail, "rig-move-llm-does-not-exist") {
-			t.Errorf("detail must name the offending command:\n%s", r.detail)
-		}
-		if !strings.Contains(r.detail, settingsPath) {
-			t.Errorf("detail must name the settings file:\n%s", r.detail)
-		}
+			r := checkWorkerCommand()
+			if r.status != rungFail {
+				t.Fatalf("status = %s, want FAIL", r.status.label())
+			}
+			// The detail has to say what the user will actually observe, or they
+			// will look for the problem somewhere else.
+			for _, want := range []string{"rig-move-llm", "NOT on PATH", "failed"} {
+				if !strings.Contains(r.detail, want) {
+					t.Errorf("detail missing %q: %s", want, r.detail)
+				}
+			}
+		})
 	})
 
-	t.Run("bare name on PATH resolves", func(t *testing.T) {
-		home := setHome(t)
-		repo := t.TempDir()
-		claudeDir := filepath.Join(repo, ".claude")
-		if err := os.MkdirAll(claudeDir, 0o755); err != nil {
-			t.Fatal(err)
-		}
+	t.Run("a resolvable command passes and names where it came from", func(t *testing.T) {
+		inDir(t, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			mustWrite(t, filepath.Join(home, ".claude.json"),
+				`{"mcpServers":{"worker":{"command":"rig-move-llm"}}}`)
 
-		settings := map[string]any{
-			"hooks": map[string]any{
-				"PreToolUse": []any{map[string]any{
-					"matcher": "*",
-					"hooks": []any{
-						map[string]any{"type": "command", "command": "rig-move-llm hook pre-tool"},
-					},
-				}},
-			},
-		}
-		settingsJSON, _ := json.MarshalIndent(settings, "", "  ")
-		mustWrite(t, filepath.Join(claudeDir, "settings.json"), string(settingsJSON))
+			bin := t.TempDir()
+			fake := filepath.Join(bin, "rig-move-llm")
+			mustWrite(t, fake, "#!/bin/sh\n")
+			if err := os.Chmod(fake, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin)
 
-		// Create executable and put its dir on PATH.
-		bin := t.TempDir()
-		fake := filepath.Join(bin, "rig-move-llm")
-		mustWrite(t, fake, "#!/bin/sh\necho ok\n")
-		if err := os.Chmod(fake, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		t.Setenv("PATH", bin+string(filepath.ListSeparator)+os.Getenv("PATH"))
-
-		if r := checkHookResolvableIn(repo, home); r.status != rungPass {
-			t.Fatalf("bare name on PATH should pass: status = %s (%s)", r.status.label(), r.detail)
-		}
-
-		// Now remove that dir from PATH and expect failure.
-		t.Setenv("PATH", t.TempDir())
-		if r := checkHookResolvableIn(repo, home); r.status != rungFail {
-			t.Fatalf("bare name off PATH should fail: status = %s (%s)", r.status.label(), r.detail)
-		}
+			r := checkWorkerCommand()
+			if r.status != rungPass {
+				t.Fatalf("status = %s, want PASS (%s)", r.status.label(), r.detail)
+			}
+			if !strings.Contains(r.detail, "user scope") {
+				t.Errorf("detail does not say which registration was read: %s", r.detail)
+			}
+		})
 	})
 
-	t.Run("non-executable file fails", func(t *testing.T) {
-		home := setHome(t)
-		repo := t.TempDir()
-		claudeDir := filepath.Join(repo, ".claude")
-		if err := os.MkdirAll(claudeDir, 0o755); err != nil {
-			t.Fatal(err)
-		}
+	t.Run("a project .mcp.json wins over user scope", func(t *testing.T) {
+		inDir(t, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			mustWrite(t, filepath.Join(home, ".claude.json"),
+				`{"mcpServers":{"worker":{"command":"from-user-scope"}}}`)
+			mustWrite(t, ".mcp.json", `{"mcpServers":{"worker":{"command":"from-project"}}}`)
+			t.Setenv("PATH", t.TempDir())
 
-		bin := t.TempDir()
-		notExec := filepath.Join(bin, "rig-move-llm")
-		mustWrite(t, notExec, "#!/bin/sh\necho not-exec\n")
-		// Deliberately leave mode at 0644 (not executable).
-
-		settings := map[string]any{
-			"hooks": map[string]any{
-				"PreToolUse": []any{map[string]any{
-					"matcher": "*",
-					"hooks": []any{
-						map[string]any{"type": "command", "command": notExec + " hook pre-tool"},
-					},
-				}},
-			},
-		}
-		settingsJSON, _ := json.MarshalIndent(settings, "", "  ")
-		mustWrite(t, filepath.Join(claudeDir, "settings.json"), string(settingsJSON))
-
-		r := checkHookResolvableIn(repo, home)
-
-		if r.status != rungFail {
-			t.Fatalf("non-executable file should fail: status = %s (%s)", r.status.label(), r.detail)
-		}
+			if r := checkWorkerCommand(); !strings.Contains(r.detail, "from-project") {
+				t.Errorf("the project registration was not the one checked: %s", r.detail)
+			}
+		})
 	})
 
-	t.Run("no rig hooks configured fails", func(t *testing.T) {
-		home := setHome(t)
-		repo := t.TempDir()
-		claudeDir := filepath.Join(repo, ".claude")
-		if err := os.MkdirAll(claudeDir, 0o755); err != nil {
-			t.Fatal(err)
-		}
+	t.Run("an npx registration checks npx itself", func(t *testing.T) {
+		inDir(t, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			mustWrite(t, filepath.Join(home, ".claude.json"),
+				`{"mcpServers":{"worker":{"command":"npx","args":["-y","rig-move-llm","thin-worker"]}}}`)
+			t.Setenv("PATH", t.TempDir())
 
-		// Settings with no hooks at all.
-		mustWrite(t, filepath.Join(claudeDir, "settings.json"), `{"permissions":{"allow":[]}}`)
-
-		r := checkHookResolvableIn(repo, home)
-
-		if r.status != rungFail {
-			t.Fatalf("no hooks should fail: status = %s (%s)", r.status.label(), r.detail)
-		}
-		if !strings.Contains(r.detail, "no rig-move-llm hook") {
-			t.Errorf("detail should say no rig hooks found:\n%s", r.detail)
-		}
-	})
-
-	t.Run("empty hooks fails", func(t *testing.T) {
-		home := setHome(t)
-		repo := t.TempDir()
-		claudeDir := filepath.Join(repo, ".claude")
-		if err := os.MkdirAll(claudeDir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-
-		// Settings with empty hooks object.
-		mustWrite(t, filepath.Join(claudeDir, "settings.json"), `{"hooks":{}}`)
-
-		r := checkHookResolvableIn(repo, home)
-
-		if r.status != rungFail {
-			t.Fatalf("empty hooks should fail: status = %s (%s)", r.status.label(), r.detail)
-		}
-	})
-
-	t.Run("settings.local.json with unresolvable command fails", func(t *testing.T) {
-		home := setHome(t)
-		repo := t.TempDir()
-		claudeDir := filepath.Join(repo, ".claude")
-		if err := os.MkdirAll(claudeDir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-
-		settings := map[string]any{
-			"hooks": map[string]any{
-				"PreToolUse": []any{map[string]any{
-					"matcher": "*",
-					"hooks": []any{
-						map[string]any{"type": "command", "command": "rig-move-llm-fake-local --hook"},
-					},
-				}},
-			},
-		}
-		settingsJSON, _ := json.MarshalIndent(settings, "", "  ")
-		settingsLocalPath := filepath.Join(claudeDir, "settings.local.json")
-		mustWrite(t, settingsLocalPath, string(settingsJSON))
-
-		r := checkHookResolvableIn(repo, home)
-
-		if r.status != rungFail {
-			t.Fatalf("status = %s, want FAIL (%s)", r.status.label(), r.detail)
-		}
-		if !strings.Contains(r.detail, "rig-move-llm-fake-local") {
-			t.Errorf("detail must name the offending command:\n%s", r.detail)
-		}
-		if !strings.Contains(r.detail, "settings.local.json") {
-			t.Errorf("detail must name the settings.local.json path:\n%s", r.detail)
-		}
-	})
-
-	t.Run("hooks from other tools only fails", func(t *testing.T) {
-		home := setHome(t)
-		repo := t.TempDir()
-		claudeDir := filepath.Join(repo, ".claude")
-		if err := os.MkdirAll(claudeDir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-
-		settings := map[string]any{
-			"hooks": map[string]any{
-				"PreToolUse": []any{map[string]any{
-					"matcher": "*",
-					"hooks": []any{
-						map[string]any{"type": "command", "command": "some-other-tool do-something"},
-					},
-				}},
-			},
-		}
-		settingsJSON, _ := json.MarshalIndent(settings, "", "  ")
-		mustWrite(t, filepath.Join(claudeDir, "settings.json"), string(settingsJSON))
-
-		r := checkHookResolvableIn(repo, home)
-
-		if r.status != rungFail {
-			t.Fatalf("non-rig hooks should fail: status = %s (%s)", r.status.label(), r.detail)
-		}
+			r := checkWorkerCommand()
+			if r.status != rungFail || !strings.Contains(r.detail, "npx") {
+				t.Errorf("status = %s / %s, want a FAIL naming npx", r.status.label(), r.detail)
+			}
+		})
 	})
 }

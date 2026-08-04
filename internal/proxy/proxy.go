@@ -9,7 +9,7 @@
 // old worker leg (haiku-model interception -> OpenAI translation -> local worker)
 // could never see real subagent traffic and was removed in ticket P10-B. Offload
 // now runs out-of-process through the worker MCP tool (mcp__worker__implement,
-// internal/worker), whose token cost is off the paid ledger by construction.
+// internal/thin), whose token cost is off the paid ledger by construction.
 //
 // Per-project routing (the /p/<id> path prefix, allowlist-gated) still applies:
 // it selects which project's config/upstream a request uses.
@@ -124,9 +124,10 @@ func (s *Server) resolveProject(w http.ResponseWriter, r *http.Request) (cfg con
 	return cfg, canon, true
 }
 
-// routePrefix carries a per-invocation cascade leg override in the base URL path:
+// routePrefix carries a per-invocation leg override in the base URL path:
 // /r/worker/... forces the qwen (worker) leg; /r/main/... forces the verbatim
-// Anthropic (paid) leg. `rig cascade` sets it for each pass so the shared daemon
+// Anthropic (paid) leg. The switch sets it — RIG_CC_BASE_URL normally ends in
+// /r/worker — so one shared daemon serves both legs without a restart
 // routes without a restart or a global flag flip. It is stripped before /p/<id>.
 const routePrefix = "/r/"
 
@@ -150,7 +151,7 @@ func stripRoutePrefix(r *http.Request) string {
 // translated + folded into the WORKER ledger, the main leg is a tee-scanned
 // verbatim passthrough. Other paths (count_tokens, GET, etc.) are non-billable.
 func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
-	// Per-invocation cascade override is read (and stripped) before project
+	// Per-invocation leg override is read (and stripped) before project
 	// resolution, which owns the /p/<id> segment that may follow it.
 	leg := stripRoutePrefix(r)
 
@@ -161,7 +162,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 
 	// Effective routing: an explicit /r/<leg> wins; otherwise the RouteAllToWorker
 	// flag decides. /r/main always reaches Claude even when the flag is globally on,
-	// so a cascade escalation is never trapped on the worker leg.
+	// so a request aimed at the paid leg is never trapped on the worker leg.
 	routeWorker := leg == "worker" || (leg == "" && cfg.RouteAllToWorker)
 
 	if r.Method == http.MethodPost && r.URL.Path == "/v1/messages" {

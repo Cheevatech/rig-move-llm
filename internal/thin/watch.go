@@ -44,15 +44,10 @@ func Watch(w io.Writer, dir string, follow bool) error {
 		return nil
 	}
 
-	const (
-		poll         = 300 * time.Millisecond
-		quietNotice  = 30 * time.Second // how long silence must last before we say so
-		quietRepeats = 30 * time.Second // and how often we repeat it
-	)
 	lastData := time.Now()
 	lastNotice := time.Now()
 	for {
-		time.Sleep(poll)
+		time.Sleep(watchPoll)
 		moved, done, err := drain(w, f)
 		if err != nil {
 			return err
@@ -64,7 +59,7 @@ func Watch(w io.Writer, dir string, follow bool) error {
 			lastData, lastNotice = time.Now(), time.Now()
 			continue
 		}
-		if n := time.Now(); n.Sub(lastData) > quietNotice && n.Sub(lastNotice) > quietRepeats {
+		if n := time.Now(); n.Sub(lastData) > watchQuietNotice && n.Sub(lastNotice) > watchQuietRepeats {
 			// A run inside a long `Bash` (a slow test suite) is legitimately quiet
 			// for minutes, so this is a fact, not a warning — and naming the stall
 			// ceiling next to it says how long the quiet may still legitimately last.
@@ -74,6 +69,16 @@ func Watch(w io.Writer, dir string, follow bool) error {
 		}
 	}
 }
+
+// The follow loop's timings. They are variables rather than constants so a test
+// can exercise the quiet notice without waiting half a minute for it — that
+// notice is the whole point of the command, so leaving it untested because the
+// clock is inconvenient would be testing everything except the feature.
+var (
+	watchPoll         = 300 * time.Millisecond
+	watchQuietNotice  = 30 * time.Second // how long silence must last before we say so
+	watchQuietRepeats = 30 * time.Second // and how often we repeat it
+)
 
 // drain copies whatever is new, reporting whether anything moved and whether the
 // run's closing line has appeared.
@@ -172,5 +177,7 @@ func RunSummary(dir string) string {
 	if status == "" {
 		status = "running"
 	}
-	return fmt.Sprintf("%s  [%s]  %s", filepath.Base(dir), status, truncateMiddle(task, 60))
+	// An error status is a full sentence — useful in the run's own log, far too
+	// long for a list where every row must stay one line.
+	return fmt.Sprintf("%s  [%s]  %s", filepath.Base(dir), truncateMiddle(firstLine(status), 40), truncateMiddle(task, 60))
 }

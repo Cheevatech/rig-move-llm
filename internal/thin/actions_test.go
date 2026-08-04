@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -193,4 +194,129 @@ func TestRunSummaryCallsAnUnfinishedRunRunning(t *testing.T) {
 	if s := RunSummary(dir); !strings.Contains(s, "running") {
 		t.Errorf("summary = %q, want it marked running", s)
 	}
+}
+
+// A run that never reaches a subprocess still has to explain itself. The return
+// quotes the log directory's path (S1), so an empty directory there is the
+// return pointing at nothing — and `rig watch`, the obvious next thing a human
+// does after a failed run, answered with a filesystem error instead of a reason.
+func TestFailedRunStillWritesItsLog(t *testing.T) {
+	for _, tc := range []struct {
+		name, wantIn string
+		setup        func(t *testing.T)
+	}{
+		{
+			name:   "refused for a missing base URL",
+			wantIn: "RIG_CC_BASE_URL",
+			setup:  func(t *testing.T) { t.Setenv("RIG_CC_BASE_URL", "") },
+		},
+		{
+			name:   "the worker binary does not exist",
+			wantIn: "launch",
+			setup: func(t *testing.T) {
+				t.Setenv("RIG_CC_BASE_URL", "http://127.0.0.1:9/")
+				t.Setenv("RIG_CC_BIN", filepath.Join(t.TempDir(), "not-a-real-binary"))
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			t.Setenv("RIG_THIN_LOG_ROOT", root)
+			t.Setenv("RIG_THIN_SUPERVISOR_BIN", os.Args[0])
+			tc.setup(t)
+
+			out := Run(context.Background(), gitRepo(t), "a task that never runs")
+			body, err := os.ReadFile(filepath.Join(out.LogDir, ActionsFile))
+			if err != nil {
+				t.Fatalf("a failed run left its log directory empty: %v", err)
+			}
+			got := string(body)
+			if !strings.Contains(got, "a task that never runs") {
+				t.Errorf("the log does not record the task:\n%s", got)
+			}
+			if !strings.Contains(got, "──") || !strings.Contains(got, tc.wantIn) {
+				t.Errorf("the log does not close with the reason (want %q):\n%s", tc.wantIn, got)
+			}
+			// And what the log says must be what the caller was told.
+			if !strings.Contains(out.Status, tc.wantIn) {
+				t.Errorf("status = %q, want it to name %q too", out.Status, tc.wantIn)
+			}
+
+			// watch must therefore work on it rather than error out.
+			var buf bytes.Buffer
+			if err := Watch(&buf, "", true); err != nil {
+				t.Fatalf("watch could not follow a failed run: %v", err)
+			}
+			if !strings.Contains(buf.String(), tc.wantIn) {
+				t.Errorf("watch did not show the reason:\n%s", buf.String())
+			}
+		})
+	}
+}
+
+// The quiet notice is the command's whole reason for existing: silence that is
+// never mentioned looks exactly like a dead terminal, and telling those apart is
+// what a 20-to-50-minute run needs. So it is tested, with the clock turned down.
+func TestWatchAnnouncesSilence(t *testing.T) {
+	oldPoll, oldNotice, oldRepeat := watchPoll, watchQuietNotice, watchQuietRepeats
+	watchPoll, watchQuietNotice, watchQuietRepeats = 10*time.Millisecond, 50*time.Millisecond, 50*time.Millisecond
+	t.Cleanup(func() { watchPoll, watchQuietNotice, watchQuietRepeats = oldPoll, oldNotice, oldRepeat })
+
+	root := t.TempDir()
+	t.Setenv("RIG_THIN_LOG_ROOT", root)
+	dir := filepath.Join(root, "20260804-170000-aaaaaa")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(dir, ActionsFile)
+	if err := os.WriteFile(logPath, []byte("task:    a slow one\n\n+00:01  Bash   pytest -q\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf syncBuffer
+	done := make(chan error, 1)
+	go func() { done <- Watch(&buf, "", true) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(buf.String(), "no new action for") && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !strings.Contains(buf.String(), "no new action for") {
+		t.Fatalf("watch never mentioned the silence:\n%s", buf.String())
+	}
+	// It names the guard, so a reader knows how long the quiet may still last.
+	if !strings.Contains(buf.String(), "stall guard") {
+		t.Errorf("the notice does not say when the guard acts:\n%s", buf.String())
+	}
+
+	f, _ := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	f.WriteString("+00:20  ──     finished\n")
+	f.Close()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Watch: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Watch did not return after the run finished")
+	}
+}
+
+// syncBuffer is a bytes.Buffer safe to read while Watch writes to it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }

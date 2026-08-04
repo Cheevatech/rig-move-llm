@@ -55,14 +55,29 @@ func Run(ctx context.Context, repo, task string) Outcome {
 	}
 	out := Outcome{LogDir: logDir}
 
+	// The action log opens BEFORE the checks below, not after the process starts.
+	// The return quotes this directory's path, so there has to be something at it
+	// explaining what happened — including, and especially, when the run never got
+	// as far as a subprocess. Measured: a run refused for a missing base URL left
+	// an empty directory, and `rig watch` (the obvious next thing a human does)
+	// answered with a filesystem error instead of the reason.
+	actions := newActionLog(logDir, absRepo, task)
+	defer actions.close()
+	// fail records the outcome in the log as well as in the return, so the two
+	// never disagree and no exit path can leave the directory silent.
+	fail := func(status string) Outcome {
+		out.Status = status
+		actions.finish(status)
+		return out
+	}
+
 	// Money safety, kept verbatim from the old path because the reasoning did not
 	// change: with no local base URL the subprocess would bill Anthropic from the
 	// leg that exists to avoid exactly that.
 	base := strings.TrimSpace(os.Getenv("RIG_CC_BASE_URL"))
 	if base == "" {
-		out.Status = "error: RIG_CC_BASE_URL is empty — refusing to launch the worker, " +
-			"its inference would bill Anthropic instead of the local model"
-		return out
+		return fail("error: RIG_CC_BASE_URL is empty — refusing to launch the worker, " +
+			"its inference would bill Anthropic instead of the local model")
 	}
 	bin := strings.TrimSpace(os.Getenv("RIG_CC_BIN"))
 	if bin == "" {
@@ -88,21 +103,14 @@ func Run(ctx context.Context, repo, task string) Outcome {
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		out.Status = "error: stdout pipe: " + err.Error()
-		return out
+		return fail("error: stdout pipe: " + err.Error())
 	}
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 
 	if err := cmd.Start(); err != nil {
-		out.Status = "error: launch " + bin + ": " + err.Error()
-		return out
+		return fail("error: launch " + bin + ": " + err.Error())
 	}
-
-	// Written always, never opt-in: the run it would have explained is exactly
-	// the one nobody thought to enable logging for.
-	actions := newActionLog(logDir, absRepo, task)
-	defer actions.close()
 
 	live := &liveness{last: time.Now()}
 	stopStall := watchStall(cmd, live)

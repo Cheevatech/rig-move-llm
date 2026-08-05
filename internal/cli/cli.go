@@ -40,6 +40,7 @@ Setup
   rig-move-llm uninstall [--global] [--purge]  reverse init for a scope (incl. OS service)
 
 Control
+  rig-move-llm qwen    on|off|status       swap the brain answering the NEXT turn (live)
   rig-move-llm enable  [--local]           turn offload ON  (flip ENABLED in config.env)
   rig-move-llm disable [--local]           turn offload OFF (Claude Code runs normally)
   rig-move-llm config  [--local] [--open]  show the effective config / open it in $EDITOR
@@ -100,6 +101,8 @@ func Main(args []string) int {
 		return cmdDoctor(rest)
 	case "watch":
 		return cmdWatch(rest)
+	case "qwen":
+		return cmdQwen(rest)
 	case "version", "--version", "-v":
 		fmt.Println("rig-move-llm", Version)
 		return 0

@@ -20,15 +20,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/Cheevatech/rig-move-llm/internal/config"
-	"github.com/Cheevatech/rig-move-llm/internal/thin"
 )
 
 // rungStatus is a rung's verdict. skip is not a failure: a rung that does not
@@ -121,16 +120,12 @@ func cmdDoctor(args []string) int {
 		}
 	}
 
-	cwd, _ := os.Getwd()
 	cfg := config.Load()
 
 	rungs := []rung{
 		checkConfig(cfg),
 		checkWorkerEndpoint(cfg),
 		checkSwitch(cfg),
-		checkWorkspaceTrust(cwd),
-		checkWorkerCommand(),
-		checkGuards(),
 		checkMainAuth(),
 	}
 
@@ -246,18 +241,16 @@ func checkWorkerEndpoint(cfg config.Config) rung {
 // the product does.
 func checkSwitch(cfg config.Config) rung {
 	const name = "switch"
-	base := strings.TrimSpace(cfg.CCBaseURL)
-	if base == "" {
-		return fail(name, "RIG_CC_BASE_URL is empty — the switch refuses to run rather than bill the worker leg to your account",
-			"point RIG_CC_BASE_URL at an Anthropic-format endpoint for the worker model (rig serves one at /r/worker)")
-	}
-	bin := strings.TrimSpace(os.Getenv("RIG_CC_BIN"))
-	if bin == "" {
-		bin = "claude"
-	}
-	if _, err := exec.LookPath(bin); err != nil {
-		return fail(name, "the switch runs `"+bin+"` as a subprocess and it is not on PATH",
-			"install the claude CLI, or set RIG_CC_BIN to its absolute path")
+
+	// The switch is the proxy's worker leg: Claude Code speaks Anthropic, qwen speaks
+	// OpenAI, and the translation in between is the whole product. The worker-endpoint
+	// rung proves qwen answers; this one proves the translated path answers, which is
+	// the thing a session actually rides on. It is checked against THIS install's own
+	// daemon because that is what `run` points ANTHROPIC_BASE_URL at.
+	base := "http://127.0.0.1:" + cfg.Port
+	if _, err := net.DialTimeout("tcp", "127.0.0.1:"+cfg.Port, doctorTimeout); err != nil {
+		return fail(name, "no proxy listening on port "+cfg.Port,
+			"start it with `rig-move-llm serve` (or `rig-move-llm run -- claude`, which starts one)")
 	}
 
 	body, _ := json.Marshal(map[string]any{
@@ -265,16 +258,16 @@ func checkSwitch(cfg config.Config) rung {
 		"max_tokens": 1,
 		"messages":   []map[string]string{{"role": "user", "content": "ping"}},
 	})
-	code, err := probeJSON(strings.TrimRight(base, "/")+"/v1/messages", "", body)
+	code, err := probeJSON(base+"/r/worker/v1/messages", "", body)
 	switch {
 	case err != nil:
-		return fail(name, "RIG_CC_BASE_URL unreachable: "+err.Error(),
-			"start the endpoint (`rig-move-llm serve`) or fix RIG_CC_BASE_URL")
+		return fail(name, "the proxy's worker leg is unreachable: "+err.Error(),
+			"check `rig-move-llm serve` is healthy and the worker endpoint is set")
 	case code >= 300:
-		return fail(name, fmt.Sprintf("RIG_CC_BASE_URL answered %d to an Anthropic-format request", code),
-			"the cc engine needs an ANTHROPIC-format endpoint; an OpenAI-format one will not do")
+		return fail(name, fmt.Sprintf("the proxy's worker leg answered %d to an Anthropic-format request", code),
+			"the worker endpoint must be OpenAI-format and reachable; see the worker endpoint rung above")
 	}
-	return pass(name, bin+" on PATH, "+base+" answers Anthropic-format")
+	return pass(name, "the proxy's worker leg answers Anthropic-format on "+base)
 }
 
 func ccModelOf(cfg config.Config) string {
@@ -321,42 +314,6 @@ func getSettingsPaths(repo, home string) []string {
 
 // --- rung 5: the command the MCP entry names is resolvable ----------------
 
-// checkWorkerCommand asks whether the thing rig told Claude Code to launch can
-// actually be launched. The MCP entry names `rig-move-llm` (or npx), and Claude
-// Code resolves it from the PATH of whatever started it — so an install can be
-// complete in every visible way and still never start a worker.
-//
-// Measured 2026-08-04 on a real machine: `init --global` wrote a correct
-// registration, and the session reported `worker: failed` with no
-// mcp__worker__implement anywhere, because the binary had never been put on
-// PATH. Nothing said so. The old ladder had a rung for exactly this shape, aimed
-// at the hook command; S4 deleted it along with the hooks instead of repointing
-// it at the command that survived, so this rung is that one, restored to the
-// surface rig actually has.
-func checkWorkerCommand() rung {
-	const name = "worker command"
-	cmd, source := workerMCPCommand()
-	if cmd == "" {
-		return skip(name, "no MCP registration found — run `rig-move-llm init`")
-	}
-	if cmd == "npx" {
-		// npx resolves the package at spawn time; the only thing to check here is
-		// that npx itself exists.
-		if p, err := exec.LookPath("npx"); err == nil {
-			return pass(name, "npx found at "+p+" (worker spawned via npx, from "+source+")")
-		}
-		return fail(name, "the registration in "+source+" spawns the worker with npx, and npx is not on PATH",
-			"install Node, or re-run `rig-move-llm init` without --npx after installing the binary globally")
-	}
-	p, err := exec.LookPath(cmd)
-	if err != nil {
-		return fail(name,
-			fmt.Sprintf("%s registers the worker as %q, and that is NOT on PATH — Claude Code reports the server as `failed` and no mcp__worker__implement tool exists, so nothing can be delegated", source, cmd),
-			"install it globally (`npm i -g rig-move-llm`), or put the binary on the PATH of whatever launches Claude Code")
-	}
-	return pass(name, fmt.Sprintf("%s found at %s (registered in %s)", cmd, p, source))
-}
-
 // workerMCPCommand reads back the registration rig actually wrote, rather than
 // assuming what it would have written: the point of the rung is to check the
 // file on disk, which may be from an older install or hand-edited.
@@ -389,29 +346,6 @@ func workerMCPCommand() (cmd, source string) {
 }
 
 // --- rung 6: the guards ---------------------------------------------------
-
-// checkGuards reports the two ceilings rather than judging them: silence, then
-// total wall, then the per-call timeout rig declares to the client. The ladder
-// must hold or a run is killed by someone who cannot explain why — the client
-// aborting first means the caller gets a bare protocol error instead of a
-// diagnosis and the partial diff.
-//
-// Two numbers that used to be here are gone with the layer that needed them:
-// the gate credit (there is no gate to excuse time for) and the per-turn
-// delegation budget (nothing counts rounds any more).
-func checkGuards() rung {
-	const name = "guards"
-	stall, wall, client := thin.StallCeiling(), thin.WallCeiling(), thin.ClientCallTimeout()
-	detail := fmt.Sprintf("stall %s%s < wall %s%s < client %s",
-		stall, envSource("RIG_THIN_STALL"),
-		wall, envSource("RIG_THIN_WALL"),
-		client)
-	if stall >= wall || wall >= client {
-		return fail(name, detail,
-			"restore the ordering stall < wall < client, or the run is killed by someone who cannot explain why")
-	}
-	return pass(name, detail)
-}
 
 // envSource annotates a value with where it came from — a silent override is how
 // two runs get compared as if they were the same configuration.

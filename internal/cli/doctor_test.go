@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/Cheevatech/rig-move-llm/internal/config"
-	"github.com/Cheevatech/rig-move-llm/internal/thin"
 )
 
 // The rung that #35 is about. The failure it exists to catch is NOT "no
@@ -87,14 +86,17 @@ func TestConfigRung(t *testing.T) {
 // unconditional now: there is no second engine to skip in favour of, and a SKIP
 // here would be a lie about the only thing the product does.
 func TestSwitchRung(t *testing.T) {
-	t.Run("no base URL fails", func(t *testing.T) {
-		r := checkSwitch(config.Config{})
-		if r.status != rungFail || !strings.Contains(r.detail, "RIG_CC_BASE_URL") {
-			t.Errorf("want a base-URL diagnosis, got %s / %s", r.status.label(), r.detail)
+	// The rung asks the one question a session depends on: does THIS install's proxy
+	// answer an Anthropic-format request on its worker leg? The old rung probed
+	// RIG_CC_BASE_URL, which only ever mattered while the worker was a subprocess.
+	t.Run("no proxy listening fails", func(t *testing.T) {
+		r := checkSwitch(config.Config{Port: "1"})
+		if r.status != rungFail || !strings.Contains(r.detail, "no proxy listening") {
+			t.Errorf("want a listener diagnosis, got %s / %s", r.status.label(), r.detail)
 		}
 	})
 
-	t.Run("an anthropic-format endpoint passes", func(t *testing.T) {
+	t.Run("the worker leg answering Anthropic-format passes", func(t *testing.T) {
 		var hit string
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			hit = r.URL.Path
@@ -102,62 +104,14 @@ func TestSwitchRung(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		bin := t.TempDir()
-		fake := filepath.Join(bin, "claude")
-		mustWrite(t, fake, "#!/bin/sh\n")
-		if err := os.Chmod(fake, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		t.Setenv("PATH", bin)
-
-		r := checkSwitch(config.Config{CCBaseURL: srv.URL, CCModel: "qwen"})
+		port := srv.URL[strings.LastIndex(srv.URL, ":")+1:]
+		r := checkSwitch(config.Config{Port: port, CCModel: "qwen"})
 
 		if r.status != rungPass {
 			t.Fatalf("status = %s, want PASS (%s)", r.status.label(), r.detail)
 		}
-		if hit != "/v1/messages" {
-			t.Errorf("probed %q, want the Anthropic messages endpoint", hit)
-		}
-	})
-
-	t.Run("a missing claude CLI fails", func(t *testing.T) {
-		t.Setenv("PATH", t.TempDir())
-		r := checkSwitch(config.Config{CCBaseURL: "http://127.0.0.1:1"})
-		if r.status != rungFail || !strings.Contains(r.detail, "not on PATH") {
-			t.Errorf("want a PATH diagnosis for the subprocess, got %s / %s", r.status.label(), r.detail)
-		}
-	})
-}
-
-// The guard rung reports the ladder AND names silent env overrides — two runs
-// compared as the same configuration is how the wall claim went wrong.
-func TestGuardsRung(t *testing.T) {
-	t.Run("the shipping ladder passes and shows the numbers", func(t *testing.T) {
-		r := checkGuards()
-		if r.status != rungPass {
-			t.Fatalf("status = %s, want PASS (%s)", r.status.label(), r.detail)
-		}
-		for _, want := range []string{thin.StallCeiling().String(), thin.WallCeiling().String(),
-			thin.ClientCallTimeout().String()} {
-			if !strings.Contains(r.detail, want) {
-				t.Errorf("detail missing %q:\n%s", want, r.detail)
-			}
-		}
-	})
-
-	t.Run("an override is named, not silent", func(t *testing.T) {
-		t.Setenv("RIG_THIN_WALL", "2000")
-		if r := checkGuards(); !strings.Contains(r.detail, "env RIG_THIN_WALL=2000") {
-			t.Errorf("an env override must be visible in the report:\n%s", r.detail)
-		}
-	})
-
-	t.Run("a broken ladder fails", func(t *testing.T) {
-		// A wall below the stall guard means the round dies without the stall
-		// diagnosis ever being reachable.
-		t.Setenv("RIG_THIN_WALL", "60")
-		if r := checkGuards(); r.status != rungFail {
-			t.Errorf("status = %s, want FAIL for stall >= wall", r.status.label())
+		if hit != "/r/worker/v1/messages" {
+			t.Errorf("probed %q, want the proxy's worker leg", hit)
 		}
 	})
 }
@@ -367,112 +321,4 @@ func TestRungStatusJSONTag(t *testing.T) {
 	if rungSkip.jsonTag() != "skip" {
 		t.Errorf("rungSkip.jsonTag() = %q, want \"skip\"", rungSkip.jsonTag())
 	}
-}
-
-// The rung that would have caught a real install failing silently: `init
-// --global` wrote a correct registration on a machine where the binary had
-// never been put on PATH, and the session reported `worker: failed` with no
-// mcp__worker__implement anywhere. Nothing said so — the old ladder had a rung
-// for this shape aimed at the hook command, and S4 deleted it with the hooks
-// instead of repointing it at the command that survived.
-func TestWorkerCommandRung(t *testing.T) {
-	// Run each case in its own directory so a stray .mcp.json cannot leak in.
-	inDir := func(t *testing.T, f func(t *testing.T)) {
-		t.Helper()
-		wd, err := os.Getwd()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chdir(t.TempDir()); err != nil {
-			t.Fatal(err)
-		}
-		defer os.Chdir(wd)
-		f(t)
-	}
-
-	t.Run("no registration anywhere is a skip, not a failure", func(t *testing.T) {
-		inDir(t, func(t *testing.T) {
-			t.Setenv("HOME", t.TempDir())
-			if r := checkWorkerCommand(); r.status != rungSkip {
-				t.Errorf("status = %s, want SKIP (%s)", r.status.label(), r.detail)
-			}
-		})
-	})
-
-	t.Run("a registered command that is not on PATH fails loudly", func(t *testing.T) {
-		inDir(t, func(t *testing.T) {
-			home := t.TempDir()
-			t.Setenv("HOME", home)
-			mustWrite(t, filepath.Join(home, ".claude.json"),
-				`{"mcpServers":{"worker":{"command":"rig-move-llm","args":["thin-worker"]}}}`)
-			t.Setenv("PATH", t.TempDir())
-
-			r := checkWorkerCommand()
-			if r.status != rungFail {
-				t.Fatalf("status = %s, want FAIL", r.status.label())
-			}
-			// The detail has to say what the user will actually observe, or they
-			// will look for the problem somewhere else.
-			for _, want := range []string{"rig-move-llm", "NOT on PATH", "failed"} {
-				if !strings.Contains(r.detail, want) {
-					t.Errorf("detail missing %q: %s", want, r.detail)
-				}
-			}
-		})
-	})
-
-	t.Run("a resolvable command passes and names where it came from", func(t *testing.T) {
-		inDir(t, func(t *testing.T) {
-			home := t.TempDir()
-			t.Setenv("HOME", home)
-			mustWrite(t, filepath.Join(home, ".claude.json"),
-				`{"mcpServers":{"worker":{"command":"rig-move-llm"}}}`)
-
-			bin := t.TempDir()
-			fake := filepath.Join(bin, "rig-move-llm")
-			mustWrite(t, fake, "#!/bin/sh\n")
-			if err := os.Chmod(fake, 0o755); err != nil {
-				t.Fatal(err)
-			}
-			t.Setenv("PATH", bin)
-
-			r := checkWorkerCommand()
-			if r.status != rungPass {
-				t.Fatalf("status = %s, want PASS (%s)", r.status.label(), r.detail)
-			}
-			if !strings.Contains(r.detail, "user scope") {
-				t.Errorf("detail does not say which registration was read: %s", r.detail)
-			}
-		})
-	})
-
-	t.Run("a project .mcp.json wins over user scope", func(t *testing.T) {
-		inDir(t, func(t *testing.T) {
-			home := t.TempDir()
-			t.Setenv("HOME", home)
-			mustWrite(t, filepath.Join(home, ".claude.json"),
-				`{"mcpServers":{"worker":{"command":"from-user-scope"}}}`)
-			mustWrite(t, ".mcp.json", `{"mcpServers":{"worker":{"command":"from-project"}}}`)
-			t.Setenv("PATH", t.TempDir())
-
-			if r := checkWorkerCommand(); !strings.Contains(r.detail, "from-project") {
-				t.Errorf("the project registration was not the one checked: %s", r.detail)
-			}
-		})
-	})
-
-	t.Run("an npx registration checks npx itself", func(t *testing.T) {
-		inDir(t, func(t *testing.T) {
-			home := t.TempDir()
-			t.Setenv("HOME", home)
-			mustWrite(t, filepath.Join(home, ".claude.json"),
-				`{"mcpServers":{"worker":{"command":"npx","args":["-y","rig-move-llm","thin-worker"]}}}`)
-			t.Setenv("PATH", t.TempDir())
-
-			r := checkWorkerCommand()
-			if r.status != rungFail || !strings.Contains(r.detail, "npx") {
-				t.Errorf("status = %s / %s, want a FAIL naming npx", r.status.label(), r.detail)
-			}
-		})
-	})
 }

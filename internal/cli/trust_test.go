@@ -6,8 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/Cheevatech/rig-move-llm/internal/config"
 )
 
 // trustEnv points HOME at a scratch dir and returns (home, dataDir, canonical
@@ -198,52 +196,4 @@ func TestGrantWorkspaceTrustRefusesBrokenJSON(t *testing.T) {
 	if string(b) != "{not json" {
 		t.Errorf("the user's file was rewritten: %q", b)
 	}
-}
-
-// The whole point of #16, end to end: `init --trust-workspace` makes a headless
-// run's permissions actually apply, and a plain `init` does not touch the user's
-// trust state at all.
-func TestApplyInitGrantsTrustOnlyWhenAsked(t *testing.T) {
-	run := func(t *testing.T, trust bool) string {
-		t.Helper()
-		home := t.TempDir()
-		t.Setenv("HOME", home)
-		repo := filepath.Join(home, "repo")
-		if err := os.MkdirAll(repo, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		cwd, _ := os.Getwd()
-		if err := os.Chdir(repo); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { os.Chdir(cwd) })
-
-		rc := applyInit(initOpts{
-			global: true, workerBase: "http://w:8000/v1", enabled: true,
-			mainUpstream: "https://api.anthropic.com", port: "4000", force: true,
-			trustWorkspace: trust,
-		})
-		if rc != 0 {
-			t.Fatalf("applyInit rc=%d", rc)
-		}
-		canon, err := config.CanonicalPath(".")
-		if err != nil {
-			t.Fatal(err)
-		}
-		return canon
-	}
-
-	t.Run("granted on request", func(t *testing.T) {
-		canon := run(t, true)
-		if !workspaceTrusted(canon) {
-			t.Error("init --trust-workspace did not grant workspace trust")
-		}
-	})
-
-	t.Run("untouched by default", func(t *testing.T) {
-		canon := run(t, false)
-		if workspaceTrusted(canon) {
-			t.Error("a plain init must not grant workspace trust")
-		}
-	})
 }

@@ -2,11 +2,10 @@
 // subcommands, dispatched from a bare os.Args slice (stdlib flag, no framework).
 //
 //	rig-move-llm serve [--port N]        run the routing proxy
-//	rig-move-llm thin-worker             the switch: MCP stdio server (one tool)
+//	rig-move-llm qwen  on|off|status      swap the brain answering the next turn
 //	rig-move-llm init  [--global] ...     bootstrap config + wiring for a scope
 //	rig-move-llm run   [--] <cmd...>      launch a command with the proxy wired in
 //	rig-move-llm stats [--reset|--history] token accounting (observability)
-//	rig-move-llm watch [--list]           follow a run's actions live
 //	rig-move-llm version
 package cli
 
@@ -46,14 +45,10 @@ Control
   rig-move-llm config  [--local] [--open]  show the effective config / open it in $EDITOR
   rig-move-llm stats   [--reset|--history] token accounting / savings
   rig-move-llm doctor                      prove the offload rig is live before you trust a number
-  rig-move-llm watch  [--list] [<run dir>]  follow what the worker is doing right now
 
 Run
   rig-move-llm run    [--] <command...>    launch a command with the proxy wired in
   rig-move-llm serve  [--port N] [--status]  run the routing proxy / report its state
-
-Internal (invoked by Claude Code / MCP; rarely run by hand)
-  rig-move-llm thin-worker                 the switch: MCP stdio server exposing 'implement'
 
   rig-move-llm version
   rig-move-llm help
@@ -79,10 +74,6 @@ func Main(args []string) int {
 		return cmdSetup(rest)
 	case "serve":
 		return cmdServe(rest)
-	case "thin-worker":
-		return cmdThinWorker(rest)
-	case "thin-supervise":
-		return cmdThinSupervise(rest)
 	case "init":
 		return cmdInit(rest)
 	case "uninstall":
@@ -99,8 +90,6 @@ func Main(args []string) int {
 		return cmdStats(rest)
 	case "doctor":
 		return cmdDoctor(rest)
-	case "watch":
-		return cmdWatch(rest)
 	case "qwen":
 		return cmdQwen(rest)
 	case "version", "--version", "-v":

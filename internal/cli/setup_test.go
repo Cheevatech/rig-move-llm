@@ -10,11 +10,12 @@ import (
 	"github.com/Cheevatech/rig-move-llm/internal/config"
 )
 
-// TestApplyInitGlobalFollowsYou asserts the global "follows you" wiring: a
-// user-scope worker in ~/.claude.json, the tool-permission grant, and
-// ENABLED=true. Since S4 there is no SessionStart hook to assert: every hook rig
-// installed called `rig hook`, which no longer exists.
-func TestApplyInitGlobalFollowsYou(t *testing.T) {
+// TestApplyInitWritesConfigAndNothingElse locks in what a global install is now:
+// config, and nothing that points Claude Code at a tool. The MCP registration, the
+// tool-permission grant and the steer all existed to hand work to a worker
+// subprocess; the switch swaps the model underneath one session instead, so an
+// install that still wrote them would be wiring up a thing that is not there.
+func TestApplyInitWritesConfigAndNothingElse(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -26,33 +27,34 @@ func TestApplyInitGlobalFollowsYou(t *testing.T) {
 		t.Fatalf("applyInit rc=%d", rc)
 	}
 
-	// user-scope MCP registration (loads in every project, no per-project .mcp.json)
-	data, err := os.ReadFile(filepath.Join(home, ".claude.json"))
-	if err != nil {
-		t.Fatalf("~/.claude.json not written: %v", err)
-	}
-	var root map[string]any
-	if err := json.Unmarshal(data, &root); err != nil {
-		t.Fatalf("~/.claude.json invalid: %v", err)
-	}
-	servers, _ := root["mcpServers"].(map[string]any)
-	if servers["worker"] == nil {
-		t.Errorf("worker not registered at user scope: %s", data)
-	}
-
-	// The global settings carry the grant and NO hook.
-	sdata, _ := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
-	if !strings.Contains(string(sdata), workerToolPermission) {
-		t.Errorf("tool permission not granted at global scope: %s", sdata)
-	}
-	if strings.Contains(string(sdata), "hook") {
-		t.Errorf("a global install still wires a hook; `rig hook` was deleted in S4: %s", sdata)
-	}
-
-	// global config carries ENABLED=true
 	cdata, _ := os.ReadFile(filepath.Join(home, config.DirName, config.ConfigFile))
 	if !strings.Contains(string(cdata), "ENABLED=true") {
 		t.Errorf("ENABLED=true missing from global config: %s", cdata)
+	}
+
+	if data, err := os.ReadFile(filepath.Join(home, ".claude.json")); err == nil {
+		var root map[string]any
+		_ = json.Unmarshal(data, &root)
+		if servers, _ := root["mcpServers"].(map[string]any); servers["worker"] != nil {
+			t.Errorf("install still registers a worker MCP server; there is no worker: %s", data)
+		}
+	}
+
+	sdata, _ := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+	for _, gone := range []string{"mcp__worker__implement", "enableAllProjectMcpServers", "hook"} {
+		if strings.Contains(string(sdata), gone) {
+			t.Errorf("settings.json still carries %q from the delegate era: %s", gone, sdata)
+		}
+	}
+
+	for _, p := range []string{
+		filepath.Join(home, ".claude", "CLAUDE.md"),
+		filepath.Join(home, ".claude", steerImportFile),
+		filepath.Join(home, ".claude", "commands", "qwen.md"),
+	} {
+		if _, err := os.Stat(p); err == nil {
+			t.Errorf("install still writes %s; nothing is being steered anywhere", p)
+		}
 	}
 }
 

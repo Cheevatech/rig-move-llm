@@ -59,9 +59,9 @@ For a registered project, `run` embeds the project's identity in the base URL pa
 **There is no savings number here, and that is deliberate.** rig has carried two savings figures in its life and both were withdrawn — the first because it was measured on machinery that had since been deleted, the second because it counted the wrong denominator. The honest statement of what has been measured is:
 
 - Offloaded turns are **not billed to your Anthropic quota**, and that part is verifiable at the wire.
-- Whether offloading is *worth it* depends on how much of the offloaded work you end up accepting, and **that has not been measured.** A number that divides by "work issued" instead of "work accepted" flatters the switch and tells you nothing about whether to use it.
+- Whether offloading is *worth it* depends on how much of the offloaded work you end up **accepting**. A small backtest on one real repository has now measured both halves of that, and they point in opposite directions: the work that was accepted cost dramatically fewer billed tokens, and most of what came back was not acceptable as-is. Either figure quoted without the other misleads, so this README quotes neither.
 
-Until that measurement exists, treat rig as a mechanism that does exactly what it says on the wire, and judge the output yourself.
+Treat rig as a mechanism that does exactly what it says on the wire, and judge the output yourself.
 
 Other things that stay true regardless:
 
@@ -70,6 +70,10 @@ Other things that stay true regardless:
 - **Claude Code's `/cost` display is cosmetic under rig.** It prices every turn as if Claude had answered it, including turns your local model answered, and it can jump tiers on a long context. Read `rig-move-llm stats` instead — and read `stats` with the caveat in [Accounting](#accounting).
 - **Worker models are slower than the frontier, and vary run to run.** Two runs of the same task can produce materially different work. This is headless/AFK-shaped: good for work you are willing to walk away from, poor for interactive latency.
 - **Nothing certifies the worker's output.** rig has no gate, no verdict, no pass/fail. You read the diff. That is the check.
+
+**How often does it need rejecting? Often enough that reading is the job, not a formality.** In a small backtest on one real repository, most of what came back through the switch was not acceptable as-is. Twice the model's own tests passed while the code was wrong — one test compared the wrong two array elements, and another's assertions were written `assert (cond, "message")`, a tuple that can never be false. Both were caught by reading the diff, and only by reading it.
+
+This is also why rig ships no gate. A gate reports what the tests report, and the tests were the thing that was wrong.
 
 ## Stopping a run
 

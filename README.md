@@ -2,7 +2,9 @@
 
 **Move the heavy lifting off your paid LLM.** rig is a switch. It sits between Claude Code and Anthropic, and it lets you change *which model answers the next turn* — from your paid Claude to a worker model of your choice (your own local llama.cpp / Ollama / ExLlama, or any OpenAI-compatible API) — **in the middle of a live session, without restarting it and without losing the context you have built up.**
 
-Plan and scope on Claude. Type `rig-move-llm qwen on`. The next turn is answered by your own model, in the same conversation, with the same history, driving the same Claude Code toolset. Type `rig-move-llm qwen off` to hand the wheel back.
+Plan and scope on Claude. Type `/worker on`. The next turn is answered by your own model, in the same conversation, with the same history, driving the same Claude Code toolset. Type `/worker off` to hand the wheel back.
+
+**Either model can throw the switch itself, and so can you.** `/worker on` is a plain slash command that runs one CLI call, so the paid model can hand off the moment its planning is done, without you watching. There is also `rig-move-llm worker on|off` from a second terminal — the one path that works no matter which model is currently driving, because it does not go through a model at all.
 
 > Status: **pre-release (0.8, unreleased).** The architecture changed twice in the last week. There is no savings number in this README, on purpose — see [What this claims](#what-this-claims-and-what-it-does-not).
 
@@ -13,7 +15,7 @@ Plan and scope on Claude. Type `rig-move-llm qwen on`. The next turn is answered
   claude  ──────────► │  rig-move-llm serve   (ANTHROPIC_BASE_URL)   │
    (unmodified)       └──────────────────────────────────────────────┘
                               │                        │
-              qwen OFF ───────┘                        └─────── qwen ON
+            worker OFF ───────┘                        └─────── worker ON
                     │                                            │
                     ▼                                            ▼
         api.anthropic.com                              your worker endpoint
@@ -24,7 +26,7 @@ Plan and scope on Claude. Type `rig-move-llm qwen on`. The next turn is answered
 
 There is no second agent, no subprocess, no delegation, and no result to hand back and trust. Claude Code never learns that the model behind the endpoint changed; it keeps its own tools, its own permissions, and its own transcript.
 
-The flip is live because the proxy re-reads config **fresh on every request** — no cache, no restart, and no distinction between a registered project and a plain global install. `rig-move-llm qwen on` writes one key to `config.env`; the next HTTP request a running session makes picks it up.
+The flip is live because the proxy re-reads config **fresh on every request** — no cache, no restart, and no distinction between a registered project and a plain global install. `worker on` writes one key to `config.env`; the next HTTP request a running session makes picks it up.
 
 One static Go binary, stdlib only. Cross-compiles to macOS / Linux / Windows (amd64 + arm64) with no toolchain.
 
@@ -43,9 +45,9 @@ rig-move-llm run -- claude              # launches Claude Code with the proxy wi
 and in a second terminal, whenever you want to change brains:
 
 ```sh
-rig-move-llm qwen on                    # next turn runs on your worker
-rig-move-llm qwen off                   # next turn runs on Claude again
-rig-move-llm qwen status                # which brain is answering, and where it points
+rig-move-llm worker on                  # next turn runs on your worker
+rig-move-llm worker off                 # next turn runs on Claude again
+rig-move-llm worker status              # which model is answering, and where it points
 ```
 
 `run` is required: it is what sets `ANTHROPIC_BASE_URL` for that one process (and only that one — it is a per-process env var, so it never leaks into your other projects). It starts a `serve` daemon in the background if one is not already listening. A bare `claude` launched by hand does not go through rig at all.
@@ -75,6 +77,23 @@ Other things that stay true regardless:
 
 This is also why rig ships no gate. A gate reports what the tests report, and the tests were the thing that was wrong.
 
+## Handing the wheel back
+
+Handing *over* is reliable: the paid model runs `/worker on` and the next turn is the worker's. Handing *back* has a catch worth knowing before you rely on it, because after the flip the model deciding anything is the worker.
+
+Measured on a real session against a local qwen:
+
+| | result |
+|---|---|
+| paid model runs `/worker on` | works |
+| worker does the actual task after the handoff | works |
+| worker runs `/worker off` **when that is the instruction in front of it** | works — it even recovered from guessing the command's name wrong on the first try |
+| worker runs `/worker off` **as step 3 of a 4-step plan it inherited** | **does not happen** — it finished step 2, declared the task complete, and dropped the rest |
+
+So: ask for the handback when you want it and it happens. Write it into a plan and hope the worker gets there, and it may not — small models truncate plans, and no wording in a slash command fixes that.
+
+`rig-move-llm worker off` from a second terminal needs no model to cooperate, which is why it stays even though `/worker off` is the nicer surface.
+
 ## Stopping a run
 
 Kill the client and the worker stops. Measured: a probe against a busy local endpoint answered in 57.5s while a run was in flight and in 0.5s immediately after the client was killed — the server was genuinely free, not merely disconnected.
@@ -91,7 +110,7 @@ Setup
   rig-move-llm uninstall [--global] [--purge]         reverse init for a scope
 
 Control
-  rig-move-llm qwen    on|off|status [--global]   swap the brain answering the NEXT turn
+  rig-move-llm worker  on|off|status [--global]   swap the model answering the NEXT turn
   rig-move-llm config  [--local] [--open]         show the effective config / edit it
   rig-move-llm enable  [--local]                  set ENABLED=true  in config.env
   rig-move-llm disable [--local]                  set ENABLED=false in config.env
@@ -106,11 +125,18 @@ Run
 
 `init` flags: `--global --backend --worker-base --worker-model --worker-key --main-upstream --port --force --no-detect --service`. `--service` requires `--global` and installs an OS service (launchd on macOS, a systemd `--user` unit on Linux, a scheduled task on Windows) so the proxy survives a reboot.
 
-**Scope.** `global` (`~/.rig-move-llm`) follows you across every project; `local` (`./.rig-move-llm`) is this directory only. Precedence is **process env > local > global**. `qwen` defaults to the *local* scope, because that is the scope a live session actually reads.
+**Scope.** `global` (`~/.rig-move-llm`) follows you across every project; `local` (`./.rig-move-llm`) is this directory only. Precedence is **process env > local > global**. `worker` defaults to the *local* scope, because that is the scope a live session reads first.
 
 ## Configuration
 
-`init` writes exactly one file — `<scope>/.rig-move-llm/config.env` — and registers the project in the allowlist. It writes no hooks, no `CLAUDE.md`, no MCP servers, and no Claude Code settings. It also adds `.claude/`, `.mcp.json` and `.rig-move-llm/` to `.git/info/exclude` (local and never committed, so rig does not edit a `.gitignore` you share with your team).
+`init` writes two files and registers the project in the allowlist:
+
+- `<scope>/.rig-move-llm/config.env` — your configuration
+- `<scope>/.claude/commands/worker.md` — the `/worker` slash command
+
+It writes no hooks, no `CLAUDE.md`, no MCP servers, and no Claude Code settings. The slash command is the one thing rig puts in your `.claude/` dir, and it is deliberately the only kind of thing that belongs there: a hook that stops firing fails silently, whereas a slash command does nothing at all until you type it and its absence is obvious the moment you do. `uninstall` removes it again — unless you edited it, in which case that copy is yours.
+
+`init` also adds `.claude/`, `.mcp.json` and `.rig-move-llm/` to `.git/info/exclude` (local and never committed, so rig does not edit a `.gitignore` you share with your team).
 
 The keys the proxy actually reads:
 
@@ -122,7 +148,7 @@ WORKER_MODEL=qwen2.5-coder:32b                # model name sent to that endpoint
 WORKER_API_KEY=...                            # optional for local models; an OpenRouter key for OpenRouter
 WORKER_BACKEND=generic                        # ollama|llamacpp|tabby|openrouter|openai|generic — sets a default base URL
 
-RIG_ROUTE_ALL_TO_WORKER=false                 # THE SWITCH — prefer `rig-move-llm qwen on|off` to editing this
+RIG_ROUTE_ALL_TO_WORKER=false                 # THE SWITCH — prefer `/worker on|off` to editing this
 ENABLED=true                                  # master switch, see below
 
 MAIN_UPSTREAM_URL=https://api.anthropic.com   # the paid leg (raw passthrough, OAuth untouched)
@@ -136,9 +162,9 @@ The setup wizard collects the worker endpoint for you; you should not need to ha
 
 ### Two switches, and why
 
-`RIG_ROUTE_ALL_TO_WORKER` is the flip you use every day — `qwen on`, `qwen off`, many times a session. `ENABLED` is the master switch: with it false, **nothing** reaches the worker, including an explicit `/r/worker`, no matter what the flip says. Flip it with `rig-move-llm enable` / `disable` (add `--local` for this project only).
+`RIG_ROUTE_ALL_TO_WORKER` is the flip you use every day — `/worker on`, `/worker off`, many times a session. `ENABLED` is the master switch: with it false, **nothing** reaches the worker, including an explicit `/r/worker`, no matter what the flip says. Flip it with `rig-move-llm enable` / `disable` (add `--local` for this project only).
 
-The master switch exists so there is one thing to turn off that you do not have to reason about — hand a repo to someone, or walk away from a machine, and `disable` is a claim about every future request rather than about the flag you last remembered to set. `qwen status` and `config` both report when the two disagree.
+The master switch exists so there is one thing to turn off that you do not have to reason about — hand a repo to someone, or walk away from a machine, and `disable` is a claim about every future request rather than about the flag you last remembered to set. `worker status` and `config` both report when the two disagree.
 
 Both are read fresh from disk per request, so either takes effect on the next turn of a running session.
 
@@ -148,7 +174,7 @@ The base URL path carries a per-request override, which is how one daemon can se
 
 ```
 POST http://127.0.0.1:4000/r/worker/v1/messages    # the worker, whatever the flip says
-POST http://127.0.0.1:4000/r/main/v1/messages      # the paid leg, even while qwen is ON
+POST http://127.0.0.1:4000/r/main/v1/messages      # the paid leg, even while the switch is ON
 ```
 
 `/r/main` exists so a request aimed at Claude is never trapped on the worker leg; `/r/worker` is what lets a measurement run both arms against one daemon. Both compose with `/p/<id>` (`/r/worker/p/<id>/v1/messages`), and both are still subject to `ENABLED`.
@@ -204,7 +230,7 @@ The project allowlist is fail-closed: the daemon refuses to load config for, or 
 
 ```
 cmd/rig-move-llm/   entry point
-internal/cli/       subcommand dispatch (setup / init / qwen / run / serve / doctor / stats / config)
+internal/cli/       subcommand dispatch (setup / init / worker / run / serve / doctor / stats / config)
 internal/cli/tui/   hand-rolled stdlib raw-mode TUI for the wizard (no framework)
 internal/config/    layered config (env > project > global) + the project allowlist
 internal/proxy/     leg routing, main-leg passthrough + metering, worker-leg translation

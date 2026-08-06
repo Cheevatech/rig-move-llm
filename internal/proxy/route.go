@@ -13,11 +13,11 @@ import (
 	"github.com/Cheevatech/rig-move-llm/pkg/translate"
 )
 
-// handleWorkerRoute is the route-cc-on-qwen prototype leg. It answers an inbound
+// handleWorkerRoute is the worker leg. It answers an inbound
 // Anthropic /v1/messages request by translating it to OpenAI Chat Completions,
-// sending it to the worker (qwen) endpoint, and translating the reply back to the
+// sending it to the worker endpoint, and translating the reply back to the
 // Anthropic wire shape Claude Code expects. Nothing here reaches the paid
-// Anthropic upstream: an UNMODIFIED CC session runs entirely on qwen, driving its
+// Anthropic upstream: an UNMODIFIED CC session runs entirely on the worker, driving its
 // own toolset. Usage is folded into the WORKER ledger (off the paid ledger).
 //
 // It supports both streaming (stream:true — the CC default) and non-streaming

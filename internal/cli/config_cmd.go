@@ -49,7 +49,7 @@ func setEnabled(name string, args []string, on bool) int {
 		// ENABLED is permission, not the flip itself. Saying so here is what keeps
 		// the two switches from being confused for one.
 		if !cfg.RouteAllToWorker {
-			fmt.Println("note: turns still run on your paid model until you run `rig-move-llm qwen on`")
+			fmt.Println("note: turns still run on your paid model until something runs `rig-move-llm worker on` (or /worker on inside a session)")
 		}
 	} else {
 		fmt.Printf("ENABLED=false — every request pins to your paid model for %s\n%s\n", scope, path)
@@ -88,7 +88,7 @@ func cmdConfig(args []string) int {
 	fmt.Printf("effective config (as seen from %s):\n", cwd)
 	fmt.Printf("  next turn runs on: %s\n", brain)
 	fmt.Printf("  enabled:        %v\n", cfg.Enabled)
-	fmt.Printf("  switch (qwen):  %v\n", cfg.RouteAllToWorker)
+	fmt.Printf("  switch (worker): %v\n", cfg.RouteAllToWorker)
 	if cfg.WorkerAPIBase != "" {
 		fmt.Printf("  worker:         %s%s backend=%s\n", cfg.WorkerAPIBase, modelNote(cfg.WorkerModel), cfg.Backend.Name)
 	} else {

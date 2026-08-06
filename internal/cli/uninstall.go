@@ -76,6 +76,10 @@ func cmdUninstall(args []string) int {
 		remove(filepath.Join(".", ".mcp.json"))
 	}
 	removeOwnedSteer(filepath.Join(claudeDir, "CLAUDE.md"))
+	// /worker is the one file init writes outside rig's own dir, so uninstall owes
+	// it a removal. Only if it still matches what init wrote: a user who edited it
+	// owns their copy, and this command is not the place to discover that.
+	removeIfUnchanged(filepath.Join(claudeDir, "commands", "worker.md"), workerCommandMD)
 	removeOwnedSteer(filepath.Join(claudeDir, "commands", "qwen.md"))
 	// The side file written when the user owns their own CLAUDE.md. Their @-import
 	// line is left in place: it is one line in a file we do not own, and an import
@@ -212,4 +216,15 @@ func remove(path string) {
 	if err := os.Remove(path); err == nil {
 		fmt.Println("removed", path)
 	}
+}
+
+// removeIfUnchanged deletes path only when its contents are byte-identical to
+// want. Anything else is the user's edit, and uninstall reverses rig's writes —
+// not the user's.
+func removeIfUnchanged(path, want string) {
+	b, err := os.ReadFile(path)
+	if err != nil || string(b) != want {
+		return
+	}
+	_ = os.Remove(path)
 }

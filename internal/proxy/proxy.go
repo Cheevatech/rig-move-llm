@@ -6,7 +6,7 @@
 //
 // Claude Code is never told the difference, which is the whole point: the flip
 // lands mid-session, in the same conversation, with the context intact. Config is
-// re-read from disk on every request (no cache), so `rig qwen on` takes effect on
+// re-read from disk on every request (no cache), so `worker on` takes effect on
 // the very next turn of a session that is already running.
 //
 // Two path prefixes shape a request before it is routed, and they compose in this
@@ -105,7 +105,7 @@ const projectPrefix = "/p/"
 func (s *Server) resolveProject(w http.ResponseWriter, r *http.Request) (cfg config.Config, project string, ok bool) {
 	if !strings.HasPrefix(r.URL.Path, projectPrefix) {
 		// Re-read the daemon's own scope, same as the /p/<id> path below. Returning
-		// the boot config here meant `rig qwen on` silently did nothing for any
+		// the boot config here meant `worker on` silently did nothing for any
 		// session not launched inside a REGISTERED project: the flag reached the
 		// file, the daemon never looked at the file again, and the flip reported
 		// success while every turn kept going to the paid leg. Measured before the
@@ -145,7 +145,7 @@ func (s *Server) resolveProject(w http.ResponseWriter, r *http.Request) (cfg con
 }
 
 // routePrefix carries a per-invocation leg override in the base URL path:
-// /r/worker/... forces the qwen (worker) leg; /r/main/... forces the verbatim
+// /r/worker/... forces the worker leg; /r/main/... forces the verbatim
 // Anthropic (paid) leg. One shared daemon therefore serves both legs at once,
 // without a restart and without flipping the global flag — which is what lets a
 // measurement run both arms against the same process. It is stripped before
@@ -167,7 +167,7 @@ func stripRoutePrefix(r *http.Request) string {
 	return leg
 }
 
-// handle routes each request. POST /v1/messages goes to the worker (qwen) leg or
+// handle routes each request. POST /v1/messages goes to the worker leg or
 // the paid Anthropic leg per the effective routing decision; the worker leg is
 // translated + folded into the WORKER ledger, the main leg is a tee-scanned
 // verbatim passthrough. Other paths (count_tokens, GET, etc.) are non-billable.
@@ -211,7 +211,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// count_tokens has no worker equivalent; answer with a local estimate when
-	// routing to qwen so CC's context pacing still works without an upstream call.
+	// routing to the worker so CC's context pacing still works without an upstream call.
 	if routeWorker && r.Method == http.MethodPost && r.URL.Path == "/v1/messages/count_tokens" {
 		body, _ := io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")

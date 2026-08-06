@@ -35,10 +35,10 @@ type Config struct {
 	LogBodies bool   // opt-in full request/response logging (default: metadata only)
 	LogMaxMB  int    // size cap for logs/requests.jsonl before compaction (default 50)
 	DataDir   string // scope dir where logs/stats are written (resolved local|global)
-	// RouteAllToWorker is THE SWITCH (RIG_ROUTE_ALL_TO_WORKER, written by `rig qwen
+	// RouteAllToWorker is THE SWITCH (RIG_ROUTE_ALL_TO_WORKER, written by `rig worker
 	// on|off`). When true the proxy stops forwarding /v1/messages to the paid
-	// Anthropic upstream and instead translates every inference to the worker (qwen)
-	// leg: an UNMODIFIED Claude Code session runs entirely on qwen, driving CC's own
+	// Anthropic upstream and instead translates every inference to the worker
+	// leg: an UNMODIFIED Claude Code session runs entirely on the worker, driving CC's own
 	// toolset, in the same session and the same context. There is no escalation back
 	// to Claude — flipping the flag off is what hands the wheel back.
 	RouteAllToWorker bool

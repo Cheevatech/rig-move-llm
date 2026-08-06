@@ -238,8 +238,8 @@ func checkWorkerEndpoint(cfg config.Config) rung {
 // --- rung 3: the switch ---------------------------------------------------
 
 // checkSwitch proves the one mechanism rig still has. The switch is the proxy's
-// worker leg: Claude Code speaks Anthropic, qwen speaks OpenAI, and the translation
-// in between is the whole product. The worker-endpoint rung proves qwen answers;
+// worker leg: Claude Code speaks Anthropic, the worker speaks OpenAI, and the translation
+// in between is the whole product. The worker-endpoint rung proves the endpoint answers;
 // this one proves the TRANSLATED path answers, which is the thing a session
 // actually rides on. It is checked against THIS install's own daemon because that
 // is what `run` points ANTHROPIC_BASE_URL at.

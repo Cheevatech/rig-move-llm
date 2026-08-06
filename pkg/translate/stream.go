@@ -136,7 +136,10 @@ func StreamOpenAIToAnthropic(w io.Writer, body io.Reader, inboundModel string) e
 // usage typically arrives on the final chunk.
 //
 // A mid-stream OpenAI error frame is translated into an Anthropic `error` event
-// and terminates the stream. `[DONE]` and EOF both end the stream cleanly.
+// and terminates the stream. `[DONE]` or a finish_reason ends it cleanly; a
+// connection that stops without either is reported as an `error` event too,
+// because a truncated answer signed off as end_turn is indistinguishable from a
+// complete one to whatever reads it next.
 //
 // It returns any write error encountered; read errors terminate the stream but
 // are not treated as fatal (the partial output is already flushed).
@@ -171,6 +174,12 @@ func StreamOpenAIToAnthropicUsage(w io.Writer, body io.Reader, inboundModel stri
 	var stopSequence interface{}
 	inputTokens := 0
 	outputTokens := 0
+	// Did the worker say it was finished, or did the connection just stop? Only
+	// [DONE] or a finish_reason count as the former. Without this the default
+	// "end_turn" survived a truncated stream and told the client the model had
+	// answered normally — so a tool call cut in half, or a plan cut in half,
+	// reached an agent loop labelled complete.
+	saidDone := false
 
 	reader := bufio.NewReader(body)
 	for {
@@ -180,6 +189,7 @@ func StreamOpenAIToAnthropicUsage(w io.Writer, body io.Reader, inboundModel stri
 		if strings.HasPrefix(trimmed, "data:") {
 			payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
 			if payload == "[DONE]" {
+				saidDone = true
 				break
 			}
 			if payload != "" {
@@ -215,6 +225,7 @@ func StreamOpenAIToAnthropicUsage(w io.Writer, body io.Reader, inboundModel stri
 							st.toolDelta(tc)
 						}
 						if choice.FinishReason != nil && *choice.FinishReason != "" {
+							saidDone = true
 							matched := matchedStopStreamString(choice)
 							stopReason, stopSequence = MapStopReason(*choice.FinishReason, matched)
 						}
@@ -229,6 +240,21 @@ func StreamOpenAIToAnthropicUsage(w io.Writer, body io.Reader, inboundModel stri
 	}
 
 	st.closeCurrent()
+
+	// The worker vanished mid-generation. Whatever text already went out cannot be
+	// recalled, but the turn must not be signed off as a normal completion: an
+	// `error` event is the same shape this function already uses for a mid-stream
+	// error frame, and it is the one thing a client cannot mistake for an answer.
+	if !saidDone {
+		sw.event("error", AnthropicErrorResponse{
+			Type: "error",
+			Error: AnthropicError{
+				Type:    "api_error",
+				Message: "worker stream ended before the model finished — the response above is incomplete",
+			},
+		})
+		return StreamUsage{InputTokens: inputTokens, OutputTokens: outputTokens}, sw.err
+	}
 
 	usage := map[string]interface{}{"output_tokens": outputTokens}
 	if inputTokens > 0 {

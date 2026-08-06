@@ -159,3 +159,63 @@ func TestUninstallRemovesOnlyAnUneditedWorkerCommand(t *testing.T) {
 		}
 	})
 }
+
+// A --global install has no local config.env, and `worker` used to default to the
+// local scope unconditionally — so every flip in a project answered "no config
+// here, run init first", including the one /worker makes from inside a session.
+// Global is the mode the docs recommend first, so this was the common path.
+func TestWorkerTargetsTheScopeThatWillBeRead(t *testing.T) {
+	run := func(t *testing.T, args ...string) (home, proj string, rc int) {
+		t.Helper()
+		home = t.TempDir()
+		t.Setenv("HOME", home)
+		proj = t.TempDir()
+		cwd, _ := os.Getwd()
+		if err := os.Chdir(proj); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chdir(cwd) })
+		if rc := applyInit(initOpts{
+			global: true, workerBase: "http://w/v1", workerModel: "m",
+			enabled: true, mainUpstream: "https://api.anthropic.com", port: "4000", force: true,
+		}); rc != 0 {
+			t.Fatalf("global init rc=%d", rc)
+		}
+		return home, proj, cmdWorker(args)
+	}
+
+	t.Run("global-only install flips the global scope", func(t *testing.T) {
+		home, _, rc := run(t, "on")
+		if rc != 0 {
+			t.Fatalf("worker on rc=%d, want 0 — a global install could not flip", rc)
+		}
+		b, err := os.ReadFile(filepath.Join(home, config.DirName, config.ConfigFile))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(b), "RIG_ROUTE_ALL_TO_WORKER=true") {
+			t.Errorf("global config did not get the flag:\n%s", b)
+		}
+	})
+
+	t.Run("a project with its own config owns the answer", func(t *testing.T) {
+		home, proj, _ := run(t, "status")
+		if rc := applyInit(initOpts{
+			workerBase: "http://w/v1", workerModel: "m", enabled: true,
+			mainUpstream: "https://api.anthropic.com", port: "4000", force: true,
+		}); rc != 0 {
+			t.Fatal("local init failed")
+		}
+		if rc := cmdWorker([]string{"on"}); rc != 0 {
+			t.Fatalf("worker on rc=%d", rc)
+		}
+		local, _ := os.ReadFile(filepath.Join(proj, config.DirName, config.ConfigFile))
+		if !strings.Contains(string(local), "RIG_ROUTE_ALL_TO_WORKER=true") {
+			t.Errorf("local config should have been the target:\n%s", local)
+		}
+		global, _ := os.ReadFile(filepath.Join(home, config.DirName, config.ConfigFile))
+		if strings.Contains(string(global), "RIG_ROUTE_ALL_TO_WORKER=true") {
+			t.Error("global scope was flipped even though the project has its own config")
+		}
+	})
+}

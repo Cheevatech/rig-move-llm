@@ -37,15 +37,21 @@ func cmdWorker(args []string) int {
 		action = rest[0]
 	}
 
-	path := scopeConfigPath(!*global)
-	if !fileExists(path) {
-		fmt.Fprintf(os.Stderr, "no config at %s — run `rig-move-llm init` here first\n", path)
-		return 1
-	}
-
+	// Target the scope that will actually be READ. A project with its own
+	// config.env owns the answer for itself; everything else is served by the
+	// global scope. Defaulting to local unconditionally meant a `--global` install
+	// — the mode the docs recommend first — answered every flip with "no config
+	// here, run init first", including the one the /worker slash command makes
+	// from inside the session. Measured before the fix.
+	path := scopeConfigPath(true)
 	scope := "this project"
-	if *global {
+	if *global || !fileExists(path) {
+		path = scopeConfigPath(false)
 		scope = "all projects"
+	}
+	if !fileExists(path) {
+		fmt.Fprintf(os.Stderr, "no config at %s — run `rig-move-llm init` first\n", path)
+		return 1
 	}
 
 	switch action {

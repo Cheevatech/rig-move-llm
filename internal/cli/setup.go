@@ -67,7 +67,7 @@ func cmdSetup(args []string) int {
 	// has read since — a question whose answer changed nothing is worse than none.
 
 	// 3. Make the binary permanent. Every session is launched through
-	//    `rig-move-llm run`, and the flip is `rig-move-llm qwen on` — so the binary
+	//    `rig-move-llm run`, and the flip is `rig-move-llm worker on` — so the binary
 	//    has to stay on PATH, but `npx rig-move-llm` runs transiently. Install it
 	//    globally now (that is what makes this a single command). Skipped when it is
 	//    already a real global install (not the npx cache).

@@ -275,3 +275,74 @@ func TestResetWhileRunningIsHonoured(t *testing.T) {
 			led.NMain, led.MainIn, led.MainOut)
 	}
 }
+
+// Two daemons booted from the same directory each kept their own ledger in
+// memory and flushed over the other. Measured before this: ten requests split
+// across two daemons were recorded as five. The mutex only ever protected
+// against threads within one process.
+func TestSecondRecorderInAScopeDoesNotOverwriteTheFirst(t *testing.T) {
+	dir := t.TempDir()
+
+	first, err := NewRecorder(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+
+	second, err := NewRecorder(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+
+	for i := 0; i < 5; i++ {
+		first.Record(Record{Leg: LegMain, Routed: RoutedMain, InTokens: 10, OutTokens: 1})
+		second.Record(Record{Leg: LegMain, Routed: RoutedMain, InTokens: 10, OutTokens: 1})
+	}
+	if err := first.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := os.ReadFile(filepath.Join(dir, "stats.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var led ledger
+	if err := json.Unmarshal(b, &led); err != nil {
+		t.Fatal(err)
+	}
+	// The second recorder stands down rather than half-counting: the ledger holds
+	// exactly what the owner saw, and nothing the other daemon served is silently
+	// folded in or silently dropped from the owner's own total.
+	if led.NMain != 5 || led.MainIn != 50 {
+		t.Errorf("ledger = %d req / %d in, want 5/50 — the two recorders overwrote each other",
+			led.NMain, led.MainIn)
+	}
+}
+
+// A claim left behind by a process that is gone must not lock the scope forever.
+func TestAStaleClaimIsTakenOver(t *testing.T) {
+	dir := t.TempDir()
+	// pid 0 is never a live process this can signal.
+	if err := os.WriteFile(filepath.Join(dir, "recorder.lock"), []byte("0"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r, err := NewRecorder(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	r.Record(Record{Leg: LegMain, Routed: RoutedMain, InTokens: 3, OutTokens: 1})
+	if err := r.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, "stats.json"))
+	var led ledger
+	_ = json.Unmarshal(b, &led)
+	if led.NMain != 1 {
+		t.Errorf("a stale claim blocked recording: ledger = %d req", led.NMain)
+	}
+}

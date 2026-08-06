@@ -723,3 +723,47 @@ func TestTranslateErrorStatusNoFalsePositive(t *testing.T) {
 		t.Errorf("unrelated context error was misclassified: status=%d type=%q", status, e.Error.Type)
 	}
 }
+
+// A worker that dies mid-generation must not be signed off as a normal
+// completion. stopReason defaulted to "end_turn" and was only overwritten by a
+// finish_reason, so a cut connection told the client the model had answered —
+// and an agent loop would act on half a tool call as if it were whole.
+func TestTruncatedWorkerStreamIsAnError(t *testing.T) {
+	cut := "data: {\"choices\":[{\"delta\":{\"content\":\"hel\"}}]}\n\n"
+	var buf bytes.Buffer
+	if _, err := StreamOpenAIToAnthropicUsage(&buf, strings.NewReader(cut), "m"); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "event: error") {
+		t.Errorf("a truncated stream must emit an error event:\n%s", out)
+	}
+	if strings.Contains(out, `"stop_reason":"end_turn"`) {
+		t.Errorf("a truncated stream was reported as a normal completion:\n%s", out)
+	}
+	if !strings.Contains(out, "hel") {
+		t.Error("the partial text already sent should still reach the client")
+	}
+}
+
+// The counterpart: a worker that finishes properly must stay clean. Many
+// OpenAI-compatible servers send a finish_reason and close without [DONE], so
+// treating a missing [DONE] alone as truncation would break the common case.
+func TestCleanStreamsAreNotFlaggedAsTruncated(t *testing.T) {
+	cases := map[string]string{
+		"finish_reason then close": "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n",
+		"finish_reason then DONE":  "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+		"DONE alone":               "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n",
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if _, err := StreamOpenAIToAnthropicUsage(&buf, strings.NewReader(body), "m"); err != nil {
+				t.Fatal(err)
+			}
+			if out := buf.String(); strings.Contains(out, "event: error") {
+				t.Errorf("a clean stream was flagged as truncated:\n%s", out)
+			}
+		})
+	}
+}

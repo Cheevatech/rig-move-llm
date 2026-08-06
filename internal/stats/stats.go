@@ -17,9 +17,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -110,7 +114,9 @@ type Recorder struct {
 	logBodies   bool
 	maxLogBytes int64
 	dirty       bool
-	wrote       bool // this Recorder has written statsPath at least once (see honourResetLocked)
+	wrote       bool   // this Recorder has written statsPath at least once (see honourResetLocked)
+	disabled    bool   // another daemon owns this scope's ledger; record nothing
+	lockPath    string // the claim released on Close ("" when not held)
 
 	stop chan struct{}
 	done chan struct{}
@@ -136,6 +142,22 @@ func NewRecorder(dataDir string, logBodies bool) (*Recorder, error) {
 		logBodies:   logBodies,
 		maxLogBytes: 50 << 20,
 	}
+	// One process owns the ledger. Two daemons booted from the same directory each
+	// keep their own copy in memory and flush over the other, and the loss is
+	// silent: measured, ten requests split across two daemons were recorded as
+	// five. The mutex above only ever protected against threads.
+	//
+	// The second daemon still serves — a second port is a legitimate thing to want
+	// — it just stops recording, and says so, rather than halving the number the
+	// first one is keeping.
+	if owner, ok := claimLedger(dataDir); !ok {
+		log.Printf("stats: another rig daemon (pid %s) is already recording to %s — "+
+			"this one will serve but not record, so the two do not overwrite each other's ledger", owner, dataDir)
+		r.disabled = true
+		return r, nil
+	}
+	r.lockPath = filepath.Join(dataDir, "recorder.lock")
+
 	r.loadLedger()
 	if r.led.Since == "" {
 		r.led.Since = time.Now().UTC().Format(time.RFC3339)
@@ -161,6 +183,9 @@ func (r *Recorder) Record(rec Record) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.disabled {
+		return
+	}
 
 	// Checked here and not only at flush time: a request arriving between the
 	// delete and the next flush would otherwise be folded into the totals that are
@@ -431,6 +456,9 @@ func (r *Recorder) honourResetLocked() {
 }
 
 func (r *Recorder) flushLocked() error {
+	if r.disabled {
+		return nil
+	}
 	r.honourResetLocked()
 	if !r.dirty {
 		return nil
@@ -463,10 +491,59 @@ func (r *Recorder) Close() error {
 	}
 	err := r.Flush()
 	r.mu.Lock()
+	// Release the claim so the next daemon in this scope can record. Only ours:
+	// a claim rewritten by someone else in the meantime is theirs to release.
+	if r.lockPath != "" {
+		if b, rerr := os.ReadFile(r.lockPath); rerr == nil &&
+			strings.TrimSpace(string(b)) == strconv.Itoa(os.Getpid()) {
+			_ = os.Remove(r.lockPath)
+		}
+		r.lockPath = ""
+	}
 	if r.logFile != nil {
 		_ = r.logFile.Close()
 		r.logFile = nil
 	}
 	r.mu.Unlock()
 	return err
+}
+
+// claimLedger takes ownership of a scope's ledger for this process, reporting the
+// existing owner's pid when someone else holds it. The claim is a file holding a
+// pid: a lock a crash can leave behind is worse than no lock, so a claim whose
+// process is gone is taken over rather than honoured.
+//
+// A pid file rather than flock because rig ships to Windows from the same source
+// and the stdlib's file locking is not portable.
+func claimLedger(dataDir string) (owner string, ok bool) {
+	path := filepath.Join(dataDir, "recorder.lock")
+	mine := strconv.Itoa(os.Getpid())
+
+	if b, err := os.ReadFile(path); err == nil {
+		held := strings.TrimSpace(string(b))
+		if held != "" && held != mine && pidAlive(held) {
+			return held, false
+		}
+	}
+	if err := os.WriteFile(path, []byte(mine), 0o644); err != nil {
+		// Losing the claim file is not a reason to stop recording; the race it
+		// guards against is rare and the ledger is not load-bearing for serving.
+		return "", true
+	}
+	return "", true
+}
+
+// pidAlive reports whether a process with this pid exists. Signal 0 is the
+// portable-enough probe: on unix it checks for existence without delivering
+// anything, and on Windows FindProcess itself fails for a pid that is gone.
+func pidAlive(pid string) bool {
+	n, err := strconv.Atoi(pid)
+	if err != nil || n <= 0 {
+		return false
+	}
+	p, err := os.FindProcess(n)
+	if err != nil {
+		return false
+	}
+	return p.Signal(syscall.Signal(0)) == nil
 }

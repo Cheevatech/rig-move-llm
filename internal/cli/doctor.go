@@ -238,11 +238,15 @@ func checkWorkerEndpoint(cfg config.Config) rung {
 // --- rung 3: the switch ---------------------------------------------------
 
 // checkSwitch proves the one mechanism rig still has. The switch is the proxy's
-// worker leg: Claude Code speaks Anthropic, qwen speaks OpenAI, and the translation
-// in between is the whole product. The worker-endpoint rung proves qwen answers;
+// worker leg: Claude Code speaks Anthropic, the worker speaks OpenAI, and the translation
+// in between is the whole product. The worker-endpoint rung proves the endpoint answers;
 // this one proves the TRANSLATED path answers, which is the thing a session
 // actually rides on. It is checked against THIS install's own daemon because that
-// is what `run` points ANTHROPIC_BASE_URL at.
+// is what `run` points ANTHROPIC_BASE_URL at — and down the SAME path `run` uses,
+// /p/<id> included. Probing the bare path instead asked the daemon about its own
+// boot scope: a project whose config differs from the daemon's got a FAIL for a
+// switch that works perfectly in the session it is about to open, which is the
+// exact false diagnosis this command exists to prevent.
 func checkSwitch(cfg config.Config) rung {
 	const name = "switch"
 
@@ -258,6 +262,20 @@ func checkSwitch(cfg config.Config) rung {
 		return fail(name, "no proxy listening on port "+cfg.Port,
 			"start it with `rig-move-llm serve` (or `rig-move-llm run -- claude`, which starts one)")
 	}
+	// Same prefix `run` builds, so the daemon resolves this project's config rather
+	// than whatever scope it happened to boot in. Unregistered projects have no
+	// prefix to add and are served by the daemon's scope either way.
+	//
+	// Order matters and is not the order it reads in: the proxy strips /r/<leg>
+	// BEFORE /p/<id>, so the leg override goes first. Getting it backwards produces
+	// /p/<id>/r/worker/..., which the daemon reads as a project id followed by a
+	// path it does not recognise.
+	probe := "/r/worker/v1/messages"
+	scope := "this install"
+	if canon, err := config.CanonicalPath("."); err == nil && config.ProjectAllowed(canon) {
+		probe = "/r/worker/p/" + config.EncodeProjectID(canon) + "/v1/messages"
+		scope = "this project"
+	}
 
 	// The inbound model name is only echoed back in the Anthropic-shaped reply — the
 	// worker leg sends WORKER_MODEL to the endpoint regardless — so this string is a
@@ -267,7 +285,7 @@ func checkSwitch(cfg config.Config) rung {
 		"max_tokens": 1,
 		"messages":   []map[string]string{{"role": "user", "content": "ping"}},
 	})
-	code, err := probeJSON(base+"/r/worker/v1/messages", "", body)
+	code, err := probeJSON(base+probe, "", body)
 	switch {
 	case err != nil:
 		return fail(name, "the proxy's worker leg is unreachable: "+err.Error(),
@@ -276,7 +294,7 @@ func checkSwitch(cfg config.Config) rung {
 		return fail(name, fmt.Sprintf("the proxy's worker leg answered %d to an Anthropic-format request", code),
 			"the worker endpoint must be OpenAI-format and reachable; see the worker endpoint rung above")
 	}
-	return pass(name, "the proxy's worker leg answers Anthropic-format on "+base)
+	return pass(name, "the proxy's worker leg answers Anthropic-format for "+scope+" on 127.0.0.1:"+cfg.Port)
 }
 
 // commandMentionsRig reports whether a command string references the rig binary.

@@ -322,3 +322,42 @@ func TestRungStatusJSONTag(t *testing.T) {
 		t.Errorf("rungSkip.jsonTag() = %q, want \"skip\"", rungSkip.jsonTag())
 	}
 }
+
+// The switch rung must probe the path a SESSION uses, /p/<id> included. Probing
+// the bare path asked the daemon about its own boot scope instead, so a project
+// whose config differs from the daemon's got a FAIL for a switch that works
+// perfectly in the session it was about to open.
+func TestSwitchRungProbesTheProjectPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	proj := t.TempDir()
+	cwd, _ := os.Getwd()
+	if err := os.Chdir(proj); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(cwd)
+	canon, err := config.CanonicalPath(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := config.RegisterProject(canon); err != nil {
+		t.Fatal(err)
+	}
+
+	var hit string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit = r.URL.Path
+		w.Write([]byte(`{"content":[]}`))
+	}))
+	defer srv.Close()
+
+	port := srv.URL[strings.LastIndex(srv.URL, ":")+1:]
+	if r := checkSwitch(config.Config{Port: port, Enabled: true}); r.status != rungPass {
+		t.Fatalf("status = %s (%s)", r.status.label(), r.detail)
+	}
+	want := "/r/worker/p/" + config.EncodeProjectID(canon) + "/v1/messages"
+	if hit != want {
+		t.Errorf("probed %q, want %q — doctor asked the daemon about the wrong scope", hit, want)
+	}
+}

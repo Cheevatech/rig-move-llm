@@ -136,6 +136,21 @@ func applyInit(o initOpts) int {
 		}
 	}
 
+	// 2b. The /worker slash command. This is the ONLY file rig writes outside its
+	// own dir, and it is not the kind of thing S4 deleted: a hook or a steer is
+	// machinery that fails silently, whereas a slash command does nothing at all
+	// until somebody types it, and its absence is visible the moment they do.
+	//
+	// It exists because the flip is the product, and a product whose main move
+	// requires a second terminal has made its main move awkward. With this, the
+	// paid model can hand off when its planning is done, the worker can hand back,
+	// and the human can do either — all through the same one command.
+	if err := writeWorkerCommand(claudeDirFor(o.global)); err != nil {
+		fmt.Fprintln(os.Stderr, "init: /worker command:", err)
+	} else {
+		fmt.Println("wrote /worker command")
+	}
+
 	// 3. OS service (optional): supervise `serve` across reboots.
 	if o.service {
 		self, err := os.Executable()
@@ -163,7 +178,7 @@ func applyInit(o initOpts) int {
 	// The launch line is load-bearing: rig writes no Claude Code settings, so a bare
 	// `claude` does not go through the proxy at all. `run` is what sets
 	// ANTHROPIC_BASE_URL for that one process.
-	fmt.Printf("\ninit complete — scope: %s\nstatus: %s\n\nlaunch with:  rig-move-llm run -- claude\nthen flip:    rig-move-llm qwen on   (and `qwen off` to hand it back)\n", scope, state)
+	fmt.Printf("\ninit complete — scope: %s\nstatus: %s\n\nlaunch with:  rig-move-llm run -- claude\nthen flip:    /worker on   inside the session (or `rig-move-llm worker on` here)\n", scope, state)
 	return 0
 }
 
@@ -193,7 +208,7 @@ func renderConfigEnv(v configEnvVals) string {
 	b.WriteString("\n")
 	// The switch itself. Written explicitly (not left to the default) so that reading
 	// config.env tells you which brain is answering without running anything.
-	kv("THE SWITCH: true = the next turn runs on the worker; false = it runs on your paid model. Prefer `rig-move-llm qwen on|off` over editing this by hand.", "RIG_ROUTE_ALL_TO_WORKER", "false")
+	kv("THE SWITCH: true = the next turn runs on the worker; false = it runs on your paid model. Prefer /worker on|off inside a session, or `rig-move-llm worker on|off`, over editing this by hand.", "RIG_ROUTE_ALL_TO_WORKER", "false")
 	b.WriteString("\n")
 	// Master on/off. Written explicitly so the state is unambiguous: false = wired
 	// but inert (Claude Code runs normally), flip to true after setting an endpoint.
@@ -261,3 +276,57 @@ const steerImportFile = "rig-move-llm.md"
 // more — the switch has no tool to point Claude at — but a machine that ran an
 // older rig has one on disk, and uninstall is the only thing that removes it.
 const steerSentinel = "<!-- rig-move-llm:delegate-steer -->"
+
+// claudeDirFor returns the .claude directory a slash command should live in: the
+// user's own for a global install, this project's for a local one — matching the
+// scope the rest of init just wrote.
+func claudeDirFor(global bool) string {
+	if global {
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, ".claude")
+	}
+	return filepath.Join(".", ".claude")
+}
+
+// workerCommandMD is the /worker slash command.
+//
+// The body is one instruction and nothing else, because the model reading it is
+// not always Claude: `/worker off` is typed while the WORKER is driving, so the
+// worker is the one that has to carry it out. map17 measured that prose does not
+// bind a small model through a long autonomous task — but this is a single tool
+// call it was explicitly asked to make, which is a different thing, and the CLI
+// remains as the path that needs no model at all.
+//
+// It says nothing about stopping. An earlier draft ended with "report its output
+// and stop, do nothing else in this turn" — meant for the model doing the
+// switching. Measured: the model that took over on the NEXT turn read the same
+// sentence sitting in the shared context and stopped the whole session, one turn
+// after the handoff. A switch whose own text ends the run it is handing over is
+// worse than no switch, so the wording now scopes itself to the switching and
+// explicitly says the work carries on.
+const workerCommandMD = `---
+description: Swap the model answering the next turn (on = your worker, off = your paid model)
+---
+
+Run this exact command with the Bash tool and report its output:
+
+    rig-move-llm worker $ARGUMENTS
+
+That command decides which model answers the NEXT turn. Switching is the whole of
+what this command does; whatever work was already underway carries on as before.
+`
+
+// writeWorkerCommand installs the slash command, creating .claude/commands if
+// needed. A pre-existing file the user has edited is left alone: their copy of a
+// one-line command is not worth overwriting on every re-init.
+func writeWorkerCommand(claudeDir string) error {
+	dir := filepath.Join(claudeDir, "commands")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	path := filepath.Join(dir, "worker.md")
+	if fileExists(path) {
+		return nil
+	}
+	return os.WriteFile(path, []byte(workerCommandMD), 0o644)
+}

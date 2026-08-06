@@ -66,6 +66,7 @@ func cmdStats(args []string) int {
 	data, err := os.ReadFile(statsPath)
 	if err != nil {
 		fmt.Println("no records yet — run some traffic through `serve` first")
+		warnOtherScopeHasRecords(dir)
 		return 0
 	}
 	var s stats
@@ -104,4 +105,26 @@ func orMain(v string) string {
 		return "start"
 	}
 	return v
+}
+
+// warnOtherScopeHasRecords names the other scope when THIS one is empty and that
+// one is not. The ledger belongs to the daemon's scope, not the caller's, so
+// reading it from the wrong directory prints "no records yet" for a rig that has
+// been recording all along. It cost two misdiagnoses during development — once
+// long enough to conclude the recorder was broken — and the fix a user needs is
+// one sentence, not a doc they have to already have read.
+func warnOtherScopeHasRecords(current string) {
+	other := config.GlobalDir()
+	if current == other {
+		other = config.LocalDir()
+	}
+	if other == current {
+		return
+	}
+	if !fileExists(filepath.Join(other, "stats.json")) {
+		return
+	}
+	fmt.Printf("\nnote: %s has a ledger. The ledger belongs to the scope the daemon booted in,\n"+
+		"      not the directory you are standing in — run stats from there, or check\n"+
+		"      `rig-move-llm serve --status` for which daemon is answering.\n", other)
 }

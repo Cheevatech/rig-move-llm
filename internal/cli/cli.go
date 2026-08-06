@@ -2,7 +2,7 @@
 // subcommands, dispatched from a bare os.Args slice (stdlib flag, no framework).
 //
 //	rig-move-llm serve [--port N]         run the routing proxy
-//	rig-move-llm qwen  on|off|status      swap the brain answering the next turn
+//	rig-move-llm worker on|off|status     swap the model answering the next turn
 //	rig-move-llm init  [--global] ...     bootstrap config for a scope
 //	rig-move-llm run   [--] <cmd...>      launch a command with the proxy wired in
 //	rig-move-llm stats [--reset|--history] token accounting (observability)
@@ -33,8 +33,11 @@ const usage = `rig-move-llm — move the heavy lifting off your paid LLM
   next turn — same session, same context, no hand-off.
 
     rig-move-llm run -- claude     launch a session through the switch
-    rig-move-llm qwen on           the next turn runs on your worker
-    rig-move-llm qwen off          the next turn runs on your paid model again
+    /worker on                     (inside the session) next turn runs on your worker
+    /worker off                    (inside the session) next turn runs on your paid model
+
+  Either model can run "worker on|off" itself, and so can you — from a second
+  terminal, which is the one path that works whichever model is driving.
 
 Setup
   rig-move-llm                             interactive setup wizard (same as 'setup')
@@ -43,7 +46,7 @@ Setup
   rig-move-llm uninstall [--global] [--purge]  reverse init for a scope (incl. OS service)
 
 Control
-  rig-move-llm qwen    on|off|status [--global]  swap the brain answering the NEXT turn
+  rig-move-llm worker  on|off|status [--global]  swap the model answering the NEXT turn
   rig-move-llm config  [--local] [--open]  show the effective config / open it in $EDITOR
   rig-move-llm enable  [--local]           allow the switch to route to the worker
   rig-move-llm disable [--local]           pin every request to your paid model
@@ -97,8 +100,15 @@ func Main(args []string) int {
 		return cmdStats(rest)
 	case "doctor":
 		return cmdDoctor(rest)
+	case "worker":
+		return cmdWorker(rest)
 	case "qwen":
-		return cmdQwen(rest)
+		// Undocumented alias. The command shipped to nobody under this name — it
+		// was renamed before the first release that contains it — but it is what
+		// this project's own author typed for a week, so it keeps working and says
+		// so once. Drop it in 0.9.
+		fmt.Fprintln(os.Stderr, "note: `qwen` is now `worker` (the endpoint is whatever model you point rig at)")
+		return cmdWorker(rest)
 	case "version", "--version", "-v":
 		fmt.Println("rig-move-llm", Version)
 		return 0

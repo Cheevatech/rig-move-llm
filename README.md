@@ -42,7 +42,17 @@ Then, in the project you want to work in:
 rig-move-llm run -- claude              # launches Claude Code with the proxy wired in
 ```
 
-and in a second terminal, whenever you want to change brains:
+Then, inside that session, whenever you want to change models:
+
+```
+/worker on      # next turn runs on your worker
+/worker off     # next turn runs on Claude again
+```
+
+Claude can run these itself once its planning is done — that is the intended flow,
+and it needs nobody watching. The same thing is available as a CLI, which is what
+you reach for from a second terminal when you want the switch thrown regardless of
+which model is currently driving:
 
 ```sh
 rig-move-llm worker on                  # next turn runs on your worker
@@ -52,7 +62,9 @@ rig-move-llm worker status              # which model is answering, and where it
 
 `run` is required: it is what sets `ANTHROPIC_BASE_URL` for that one process (and only that one — it is a per-process env var, so it never leaks into your other projects). It starts a `serve` daemon in the background if one is not already listening. A bare `claude` launched by hand does not go through rig at all.
 
-For a registered project, `run` embeds the project's identity in the base URL path (`/p/<id>`) so a single global daemon can serve many projects and resolve each one's own config per request. Registration happens at `init` time and is a **fail-closed allowlist** in `~/.rig-move-llm/projects.json`: a cloned repo that ships its own `config.env` has no effect on your daemon until you opt in by running `init` in it.
+For a registered project, `run` embeds the project's identity in the base URL path (`/p/<id>`) so a single global daemon can serve many projects and resolve each one's own config per request. Registration is a **fail-closed allowlist** in `~/.rig-move-llm/projects.json`, written by a project-scope `init` — `init --global` registers nothing, because a global install has no per-project config to resolve. A cloned repo that ships its own `config.env` therefore has no effect on your daemon until you opt in by running `init` inside it.
+
+Either way the flip reaches the session: a request without `/p/<id>` is served from the daemon's own scope, re-read just as freshly.
 
 ## What this claims, and what it does not
 
@@ -123,7 +135,9 @@ Run
   rig-move-llm version
 ```
 
-`init` flags: `--global --backend --worker-base --worker-model --worker-key --main-upstream --port --force --no-detect --service`. `--service` requires `--global` and installs an OS service (launchd on macOS, a systemd `--user` unit on Linux, a scheduled task on Windows) so the proxy survives a reboot.
+`init` flags: `--global --backend --worker-base --worker-model --worker-key --main-upstream --port --force --no-detect --service`.
+
+`--service` requires `--global` and installs an OS service (launchd on macOS, a systemd `--user` unit on Linux, a scheduled task on Windows) so the proxy survives a reboot — and a kill: verified on macOS that killing the process brings it straight back under a new pid. `rig-move-llm serve --status` reports both facts separately, whether the supervisor has it loaded and whether anything is actually listening, because those two come apart. `uninstall --global` removes the service with everything else.
 
 **Scope.** `global` (`~/.rig-move-llm`) follows you across every project; `local` (`./.rig-move-llm`) is this directory only. Precedence is **process env > local > global**. `worker` defaults to the *local* scope, because that is the scope a live session reads first.
 
@@ -191,7 +205,7 @@ Four rungs, exit non-zero if any fails:
 |---|---|
 | `config` | a worker endpoint resolves and `ENABLED` is true |
 | `worker endpoint` | a **real completion** succeeds — not `/v1/models`, which answers 200 unauthenticated on some servers and so cannot see a wrong API key |
-| `switch` | the proxy's own `/r/worker` route answers an Anthropic-format request, i.e. the translation a session actually rides on (SKIPs when `ENABLED=false`, since nothing routes there) |
+| `switch` | the proxy's own `/r/worker` route answers an Anthropic-format request, down the same `/p/<id>` path `run` uses, so it proves the config *this project's session* will get rather than whatever scope the daemon booted in (SKIPs when `ENABLED=false`, since nothing routes there) |
 | `MAIN auth` | credentials exist for the paid leg at all (presence, not freshness — an expired token still reads PASS) |
 
 The rule this encodes: never trust a number from rig without proving the mechanism that produced it was live. Every rung is here because a rung like it once blessed a run that was silently offloading nothing.
@@ -206,7 +220,8 @@ rig-move-llm stats --reset      # clear both
 
 Two caveats, both load-bearing:
 
-- **The ledger lives in the *daemon's* scope**, not the caller's. A global `serve` writes to `~/.rig-move-llm/stats.json` even for traffic from a project with its own local config. Run `stats` from the same scope the daemon booted in, or you will read an empty ledger and conclude nothing happened.
+- **The ledger lives in the *daemon's* scope**, not the caller's. A global `serve` writes to `~/.rig-move-llm/stats.json` even for traffic from a project with its own local config, so `stats` run from the wrong directory finds nothing. It now says so — when this scope is empty and another one is not, it names the other — but the fix is still to run it from the scope the daemon booted in.
+- **One daemon owns a scope's ledger.** A second daemon started in the same scope (`serve` on another port from the same directory) keeps serving but stops recording, and says so in its log, rather than overwriting the first one's counts.
 - **The paid leg's input is reported in three parts, because it is priced in three parts.** `stats` prints the total and then the split:
 
   ```
@@ -253,6 +268,8 @@ pkg/translate/      Anthropic ⇄ OpenAI message + stream translation
 **Removed config keys:** `GATE_MODE`, `VERIFY_CMD`, `RIG_MAX_DELEGATE_ROUNDS`, `RIG_THIN_STALL`, `RIG_THIN_WALL`, `RIG_CC_BASE_URL`, `RIG_CC_MODEL`, `RIG_WORKER_ENGINE`, `MAIN_SHARED_MCP`, `WORKER_HEALTH_PATH`, `WORKER_HEALTH_TIMEOUT_MS`, `WORKER_HEALTH_CACHE_SEC`. A key that is still parsed but no longer read is worse than a deleted one: it looks like a setting you can act on.
 
 **Migration:** `uninstall` cleans up an old install — including files written by *older* rigs (the enforcement-era hooks, output styles, `CLAUDE.md` steer and `/qwen` command) — while leaving hooks and permissions you added yourself untouched. `init` writes the new one.
+
+Verified against a simulated 0.7.x install: the hook, the `mcp__worker__implement` grant, `enableAllProjectMcpServers`, the `rig-delegate` output style, the steer, the old slash command and `.mcp.json` all went; an unrelated `Bash(ls:*)` permission in the same `settings.json` stayed.
 
 One upgrade case needs a look rather than a command. `ENABLED` used to be read only by `config` and `doctor`; it now gates routing. If your `config.env` carries `ENABLED=false` from an older install *and* you were relying on `RIG_ROUTE_ALL_TO_WORKER=true` to offload, offload will stop after upgrading and every turn will quietly run on your paid model. Nothing breaks and no work is lost — it fails toward the expensive-but-correct side — but check `rig-move-llm config` once after upgrading. It prints which model answers the next turn and says so explicitly when the two switches disagree.
 

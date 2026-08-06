@@ -42,6 +42,7 @@ func TestRouteAllToWorkerStreaming(t *testing.T) {
 			WorkerAPIBase:    worker.URL,
 			WorkerModel:      "qwen-coder",
 			RouteAllToWorker: true,
+			Enabled:          true,
 			DataDir:          dir,
 		},
 		rec: rec,
@@ -110,6 +111,7 @@ func TestRoutePrefixLegOverride(t *testing.T) {
 			WorkerAPIBase:    worker.URL,
 			WorkerModel:      "qwen",
 			RouteAllToWorker: routeAll,
+			Enabled:          true,
 			DataDir:          dir,
 		}, rec: rec}).Handler()
 	}
@@ -138,7 +140,7 @@ func TestRoutePrefixLegOverride(t *testing.T) {
 // TestRouteAllToWorkerCountTokens verifies the count_tokens shim answers locally
 // (no upstream call) with a positive estimate when routing to the worker.
 func TestRouteAllToWorkerCountTokens(t *testing.T) {
-	s := &Server{cfg: config.Config{RouteAllToWorker: true, WorkerAPIBase: "http://x"}}
+	s := &Server{cfg: config.Config{RouteAllToWorker: true, Enabled: true, WorkerAPIBase: "http://x"}}
 	h := s.Handler()
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens",
@@ -157,5 +159,52 @@ func TestRouteAllToWorkerCountTokens(t *testing.T) {
 	}
 	if out.InputTokens < 1 {
 		t.Errorf("input_tokens = %d, want >= 1", out.InputTokens)
+	}
+}
+
+// TestEnabledFalsePinsEveryRequestToMain is the regression test for the bug this
+// gate exists to prevent: ENABLED was read by `config` and `doctor` and by nothing
+// in the routing path, so `rig disable` printed "Claude Code runs normally" while
+// every turn kept going to the worker. The master switch has to outrank BOTH the
+// flag and an explicit /r/worker, or the word "disable" means nothing.
+func TestEnabledFalsePinsEveryRequestToMain(t *testing.T) {
+	var workerHit, mainHit bool
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		workerHit = true
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	}))
+	defer worker.Close()
+	main := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mainHit = true
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"id":"x","type":"message","role":"assistant","content":[],"usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer main.Close()
+
+	dir := t.TempDir()
+	rec, _ := stats.NewRecorder(dir, false)
+	h := (&Server{cfg: config.Config{
+		MainUpstreamURL: main.URL,
+		WorkerAPIBase:   worker.URL,
+		WorkerModel:     "qwen",
+		// The switch is ON and the master switch is OFF — the exact state a user
+		// lands in by running `rig qwen on` and then `rig disable`.
+		RouteAllToWorker: true,
+		Enabled:          false,
+		DataDir:          dir,
+	}, rec: rec}).Handler()
+
+	body := `{"model":"claude-opus-4-8","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`
+
+	for _, path := range []string{"/v1/messages", "/r/worker/v1/messages"} {
+		workerHit, mainHit = false, false
+		if code := postPath(t, h, path, body); code != http.StatusOK {
+			t.Fatalf("%s status %d", path, code)
+		}
+		if workerHit || !mainHit {
+			t.Errorf("%s with ENABLED=false: workerHit=%v mainHit=%v, want main only",
+				path, workerHit, mainHit)
+		}
 	}
 }

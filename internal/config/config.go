@@ -27,32 +27,20 @@ type Config struct {
 	WorkerAPIKey    string
 	WorkerModel     string // model name the worker MCP tool sends to the worker endpoint
 	Backend         Backend
-	Enabled         bool   // master on/off: when false nothing is offloaded and Claude Code behaves normally. Defaults to true when a worker endpoint is set, false when it is skipped; an explicit ENABLED overrides.
-	LogBodies       bool   // opt-in full request/response logging (default: metadata only)
-	LogMaxMB        int    // size cap for logs/requests.jsonl before compaction (default 50)
-	DataDir         string // scope dir where logs/stats are written (resolved local|global)
-	// WorkerHealthPath is the path probed at UserPromptSubmit to decide whether the
-	// worker endpoint is reachable. Default "/v1/models" (universal + free across
-	// OpenAI-compatible servers). Set to "off"/"none"/"-" to disable pre-flight
-	// health-checking (call-time error fallback still applies).
-	WorkerHealthPath string
-	HealthTimeoutMs  int // per-probe HTTP timeout (default 2000)
-	HealthCacheSec   int // reuse a probe result for this many seconds (default 15)
-	// CCBaseURL is the Anthropic-format base URL the cc engine points its
-	// subprocess at (RIG_CC_BASE_URL). Required: with
-	// it empty the engine refuses to launch, because the subprocess would
-	// otherwise bill the worker leg to the paid account (money-safety rail).
-	CCBaseURL string
-	// CCModel is the model name the cc subprocess runs as (RIG_CC_MODEL,
-	// default "haiku" — the worker-leg routing key on the model-routing shim,
-	// passed through verbatim to a direct endpoint).
-	CCModel string
-	// RouteAllToWorker is the route-cc-on-qwen prototype flag (RIG_ROUTE_ALL_TO_WORKER).
-	// When true the proxy stops forwarding /v1/messages to the paid Anthropic upstream
-	// and instead translates every inference to the worker (qwen) leg: an UNMODIFIED
-	// Claude Code session runs entirely on qwen, driving CC's own toolset. This is the
-	// prototype that measures whether qwen-driving-CC converges (kills confound B); it
-	// is NOT the cascade — there is no escalation-to-Claude here.
+	// Enabled is the master on/off (ENABLED). When false the proxy refuses to route
+	// anything to the worker — including an explicit /r/worker — so `disable` means
+	// what it says. Defaults to true when a worker endpoint is set, false when it is
+	// skipped; an explicit ENABLED overrides either way.
+	Enabled   bool
+	LogBodies bool   // opt-in full request/response logging (default: metadata only)
+	LogMaxMB  int    // size cap for logs/requests.jsonl before compaction (default 50)
+	DataDir   string // scope dir where logs/stats are written (resolved local|global)
+	// RouteAllToWorker is THE SWITCH (RIG_ROUTE_ALL_TO_WORKER, written by `rig qwen
+	// on|off`). When true the proxy stops forwarding /v1/messages to the paid
+	// Anthropic upstream and instead translates every inference to the worker (qwen)
+	// leg: an UNMODIFIED Claude Code session runs entirely on qwen, driving CC's own
+	// toolset, in the same session and the same context. There is no escalation back
+	// to Claude — flipping the flag off is what hands the wheel back.
 	RouteAllToWorker bool
 }
 
@@ -147,21 +135,6 @@ func LoadFrom(projectDir string) Config {
 		logMaxMB = n
 	}
 
-	// Health-check: default to the universal /v1/models probe unless the key was
-	// explicitly set (an explicit empty value disables it, same as "off").
-	healthPath := "/v1/models"
-	if v, ok := getOK("WORKER_HEALTH_PATH"); ok {
-		healthPath = strings.TrimSpace(v)
-	}
-	healthTimeout := 2000
-	if n, err := strconv.Atoi(strings.TrimSpace(get("WORKER_HEALTH_TIMEOUT_MS"))); err == nil && n > 0 {
-		healthTimeout = n
-	}
-	healthCache := 15
-	if n, err := strconv.Atoi(strings.TrimSpace(get("WORKER_HEALTH_CACHE_SEC"))); err == nil && n >= 0 {
-		healthCache = n
-	}
-
 	// Master switch. Absent -> enabled only when a worker endpoint is configured
 	// (skipping the worker in setup leaves it off, so Claude Code runs normally);
 	// an explicit ENABLED wins either way, so a user can pre-wire everything and
@@ -182,11 +155,6 @@ func LoadFrom(projectDir string) Config {
 		LogBodies:        truthy(get("LOG_BODIES")),
 		LogMaxMB:         logMaxMB,
 		DataDir:          dataDir,
-		WorkerHealthPath: healthPath,
-		HealthTimeoutMs:  healthTimeout,
-		HealthCacheSec:   healthCache,
-		CCBaseURL:        strings.TrimRight(strings.TrimSpace(get("RIG_CC_BASE_URL")), "/"),
-		CCModel:          strings.TrimSpace(get("RIG_CC_MODEL")),
 		RouteAllToWorker: truthy(get("RIG_ROUTE_ALL_TO_WORKER")),
 	}
 }

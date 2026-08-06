@@ -60,32 +60,20 @@ func cmdSetup(args []string) int {
 	}
 	o.enabled = o.workerBase != ""
 
-	// 2b. The Anthropic-format endpoint the switch points `claude -p` at. It is
-	// no longer a choice between engines — S4 deleted the loop and the contract
-	// layer it served, so this is THE mechanism. It ships in the product itself:
-	// `rig-move-llm serve` exposes /r/worker, translating Anthropic /v1/messages
-	// to the worker endpoint configured above (#13 / map13 A4 MAJOR-2 — an empty
-	// default here was a dead end for anyone who did not already know that).
-	if o.workerBase != "" {
-		fmt.Println()
-		base := tui.Prompt("switch base URL",
-			"Anthropic-format endpoint for the worker model. Enter = rig's own serve route (run `rig-move-llm serve` before launching claude) — it translates to the worker endpoint above",
-			ccDefaultBase(o.port))
-		if base == "" {
-			fmt.Println("  no base URL — the switch will refuse to run rather than bill the worker leg to your paid account.")
-		} else {
-			o.ccBase = base
-			o.ccModel = tui.Prompt("switch model name", "model the subprocess runs as", "haiku")
-		}
-	}
+	// There is no endpoint to ask for beyond the worker one. The switch is not a
+	// subprocess pointed at some other URL any more (#68 deleted that arm); it is
+	// this proxy choosing a leg, so the worker endpoint above IS the configuration.
+	// The prompt that used to stand here asked for RIG_CC_BASE_URL, which nothing
+	// has read since — a question whose answer changed nothing is worse than none.
 
-	// 3. Make the binary permanent. The MCP entry invokes `rig-move-llm ...`, so it must
-	//    stay on PATH — but `npx rig-move-llm` runs transiently. Install it globally
-	//    now (that is what makes this a single command). Skipped when it is already
-	//    a real global install (not the npx cache).
+	// 3. Make the binary permanent. Every session is launched through
+	//    `rig-move-llm run`, and the flip is `rig-move-llm qwen on` — so the binary
+	//    has to stay on PATH, but `npx rig-move-llm` runs transiently. Install it
+	//    globally now (that is what makes this a single command). Skipped when it is
+	//    already a real global install (not the npx cache).
 	if !globallyInstalled() {
 		fmt.Println()
-		if tui.Confirm("Install rig-move-llm globally now? (the MCP entry calls `rig-move-llm`, so it must stay on your PATH)",
+		if tui.Confirm("Install rig-move-llm globally now? (you launch and flip with `rig-move-llm`, so it must stay on your PATH)",
 			"run `npm install -g rig-move-llm`", "skip — I'll install it myself before launching claude", true) {
 			c := exec.Command("npm", "install", "-g", "rig-move-llm")
 			c.Stdout, c.Stderr = os.Stdout, os.Stderr
@@ -99,28 +87,12 @@ func cmdSetup(args []string) int {
 		}
 	}
 
-	// 3b. Workspace trust (#16). Claude Code ignores the permissions init writes
-	//     until this directory is trusted, so a headless run here stops to ask a
-	//     human. Rig can set the same flag the trust dialog sets — but only if the
-	//     person in front of it says so, because that dialog is CC's safeguard
-	//     against a repo you have not looked at yet, not rig's to switch off.
-	// 4. Wire Claude Code.
+	// 4. Write the config and register the project.
 	fmt.Println()
 	if rc := applyInit(o); rc != 0 {
 		return rc
 	}
-	fmt.Println()
-	fmt.Println("Done. Just run:  claude")
 	return 0
-}
-
-// ccDefaultBase is the wizard's suggested RIG_CC_BASE_URL: this install's own
-// serve route, which needs no external Anthropic-format dependency.
-func ccDefaultBase(port string) string {
-	if port == "" {
-		port = "4000"
-	}
-	return "http://localhost:" + port + "/r/worker"
 }
 
 // pickBackend presents the known worker backends as an explained menu, defaulting to
@@ -160,11 +132,6 @@ func globallyInstalled() bool {
 		return false
 	}
 	return fileExists(filepath.Join(strings.TrimSpace(string(out)), "bin", "rig-move-llm"))
-}
-
-func yes(s string) bool {
-	s = strings.ToLower(strings.TrimSpace(s))
-	return s == "" || s == "y" || s == "yes"
 }
 
 // stdinIsTerminal reports whether stdin is an interactive terminal, so a bare

@@ -49,22 +49,11 @@ func cmdRun(args []string) int {
 		waitPort(addr, 10*time.Second)
 	}
 
-	// When launching claude, register the worker MCP server (Option 2 offload) via
-	// --mcp-config so `mcp__worker__implement` is available. This adds to — does not
-	// replace — the user's own MCP servers (no --strict-mcp-config).
-	launch := append([]string{}, args...)
-	if filepath.Base(launch[0]) == "claude" {
-		if mcp := filepath.Join(config.Load().DataDir, "mcp.json"); fileExists(mcp) {
-			launch = append([]string{launch[0], "--mcp-config", mcp}, launch[1:]...)
-		}
-	}
-
-	cmd := exec.Command(launch[0], launch[1:]...)
+	// The command is launched verbatim. rig adds no MCP servers and no flags: since
+	// #68 the offload is the proxy choosing a leg, so ANTHROPIC_BASE_URL is the whole
+	// of the wiring, and a session that runs unmodified is exactly the point.
+	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	// No subagent-model pin: on CC 2.1.214 native subagents run in-process and
-	// never reach the base-URL proxy, so pinning them was a no-op. Offload is the
-	// worker MCP tool (ticket P9); MAIN is steered to it by the CLAUDE.md rig
-	// writes, and steered is all it is — nothing denies anything.
 	cmd.Env = append(os.Environ(), "ANTHROPIC_BASE_URL="+baseURL)
 	if err := cmd.Run(); err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {

@@ -90,7 +90,7 @@ func TestSwitchRung(t *testing.T) {
 	// answer an Anthropic-format request on its worker leg? The old rung probed
 	// RIG_CC_BASE_URL, which only ever mattered while the worker was a subprocess.
 	t.Run("no proxy listening fails", func(t *testing.T) {
-		r := checkSwitch(config.Config{Port: "1"})
+		r := checkSwitch(config.Config{Port: "1", Enabled: true})
 		if r.status != rungFail || !strings.Contains(r.detail, "no proxy listening") {
 			t.Errorf("want a listener diagnosis, got %s / %s", r.status.label(), r.detail)
 		}
@@ -105,7 +105,7 @@ func TestSwitchRung(t *testing.T) {
 		defer srv.Close()
 
 		port := srv.URL[strings.LastIndex(srv.URL, ":")+1:]
-		r := checkSwitch(config.Config{Port: port, CCModel: "qwen"})
+		r := checkSwitch(config.Config{Port: port, Enabled: true})
 
 		if r.status != rungPass {
 			t.Fatalf("status = %s, want PASS (%s)", r.status.label(), r.detail)

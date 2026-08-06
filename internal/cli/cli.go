@@ -1,9 +1,9 @@
 // Package cli is rig-move-llm's command surface: a single static binary with
 // subcommands, dispatched from a bare os.Args slice (stdlib flag, no framework).
 //
-//	rig-move-llm serve [--port N]        run the routing proxy
+//	rig-move-llm serve [--port N]         run the routing proxy
 //	rig-move-llm qwen  on|off|status      swap the brain answering the next turn
-//	rig-move-llm init  [--global] ...     bootstrap config + wiring for a scope
+//	rig-move-llm init  [--global] ...     bootstrap config for a scope
 //	rig-move-llm run   [--] <cmd...>      launch a command with the proxy wired in
 //	rig-move-llm stats [--reset|--history] token accounting (observability)
 //	rig-move-llm version
@@ -29,22 +29,26 @@ import (
 var Version = "dev"
 
 const usage = `rig-move-llm — move the heavy lifting off your paid LLM
-  Plan/review on your paid LLM; offload the code work to your own local (or cheap)
-  model. Install once, run a plain 'claude'.
+  Plan on your paid model, then swap in your own local (or cheap) model for the
+  next turn — same session, same context, no hand-off.
+
+    rig-move-llm run -- claude     launch a session through the switch
+    rig-move-llm qwen on           the next turn runs on your worker
+    rig-move-llm qwen off          the next turn runs on your paid model again
 
 Setup
   rig-move-llm                             interactive setup wizard (same as 'setup')
-  rig-move-llm setup                       guided install: scope + worker + wiring
-  rig-move-llm init  [--global] [--npx] [--service] [flags]  non-interactive bootstrap
+  rig-move-llm setup                       guided install: scope + worker endpoint
+  rig-move-llm init  [--global] [--service] [flags]  non-interactive bootstrap
   rig-move-llm uninstall [--global] [--purge]  reverse init for a scope (incl. OS service)
 
 Control
-  rig-move-llm qwen    on|off|status       swap the brain answering the NEXT turn (live)
-  rig-move-llm enable  [--local]           turn offload ON  (flip ENABLED in config.env)
-  rig-move-llm disable [--local]           turn offload OFF (Claude Code runs normally)
+  rig-move-llm qwen    on|off|status [--global]  swap the brain answering the NEXT turn
   rig-move-llm config  [--local] [--open]  show the effective config / open it in $EDITOR
-  rig-move-llm stats   [--reset|--history] token accounting / savings
-  rig-move-llm doctor                      prove the offload rig is live before you trust a number
+  rig-move-llm enable  [--local]           allow the switch to route to the worker
+  rig-move-llm disable [--local]           pin every request to your paid model
+  rig-move-llm stats   [--reset|--history] token accounting, split by leg
+  rig-move-llm doctor  [--json]            prove the switch is live before you trust a number
 
 Run
   rig-move-llm run    [--] <command...>    launch a command with the proxy wired in
@@ -52,6 +56,9 @@ Run
 
   rig-move-llm version
   rig-move-llm help
+
+A bare 'claude' does NOT go through rig: 'run' is what sets ANTHROPIC_BASE_URL, and
+it sets it for that one process only.
 
 Scope: 'global' follows you across every project (~/.rig-move-llm); 'local' is this
 directory only (./.rig-move-llm). Precedence: process env > local > global.

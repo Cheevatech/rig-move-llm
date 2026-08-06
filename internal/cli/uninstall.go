@@ -18,7 +18,7 @@ import (
 // --purge additionally deletes the scope data dir (config + logs + stats).
 func cmdUninstall(args []string) int {
 	fs := flag.NewFlagSet("uninstall", flag.ExitOnError)
-	global := fs.Bool("global", false, "uninstall the global scope (~/.claude + ~/.rig-move-llm)")
+	global := fs.Bool("global", false, "uninstall the global scope (~/.rig-move-llm, plus anything an older rig left in ~/.claude)")
 	purge := fs.Bool("purge", false, "also delete the data dir (config, logs, stats)")
 	_ = fs.Parse(args)
 

@@ -9,10 +9,11 @@
 // mechanism that produced it was live. A rung therefore checks the thing that
 // does the work, not a proxy for it — a real completion rather than /v1/models.
 //
-// S4 removed three rungs with the layer they measured (hook-resolvable,
-// hook-fires, gate-toolchain). They are gone rather than kept-and-skipped on
-// purpose: a rung that reports on a mechanism nobody has any more is #22 again,
-// one level up.
+// Rungs are deleted along with the layer they measured, rather than kept and
+// skipped: S4 dropped hook-resolvable, hook-fires and gate-toolchain with the
+// enforcement layer, and #68 dropped workspace-trust, MCP-command-resolvable and
+// the guard ladder with the delegate arm. A rung that reports on a mechanism
+// nobody has any more is #22 again, one level up.
 package cli
 
 import (
@@ -105,9 +106,11 @@ const doctorTimeout = 90 * time.Second
 func cmdDoctor(args []string) int {
 	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
 		fmt.Println("Usage: rig-move-llm doctor [--json]\n\n" +
-			"Proves the switch is live before you trust a measurement: config, worker\n" +
-			"endpoint (authenticated), the switch itself, workspace trust, the effective\n" +
-			"guards, and whether the MAIN leg has credentials to open a session at all.\n" +
+			"Proves the switch is live before you trust a measurement. Four rungs:\n" +
+			"  config           a worker endpoint resolves and ENABLED is true\n" +
+			"  worker endpoint  a REAL completion succeeds (not just /v1/models)\n" +
+			"  switch           this install's own /r/worker route answers Anthropic-format\n" +
+			"  MAIN auth        credentials exist for the paid leg (presence, not freshness)\n" +
 			"  --json  Output results as a single JSON object on stdout\n" +
 			"Exits non-zero if any rung failed.")
 		return 0
@@ -234,27 +237,33 @@ func checkWorkerEndpoint(cfg config.Config) rung {
 
 // --- rung 3: the switch ---------------------------------------------------
 
-// checkSwitch proves the one mechanism rig still has: a `claude -p` subprocess
-// that can be pointed at the local model. There is no engine choice left to
-// report — the loop engine and the contract layer it served were deleted in S4 —
-// so this rung is unconditional. A skip here would be a lie about the only thing
-// the product does.
+// checkSwitch proves the one mechanism rig still has. The switch is the proxy's
+// worker leg: Claude Code speaks Anthropic, qwen speaks OpenAI, and the translation
+// in between is the whole product. The worker-endpoint rung proves qwen answers;
+// this one proves the TRANSLATED path answers, which is the thing a session
+// actually rides on. It is checked against THIS install's own daemon because that
+// is what `run` points ANTHROPIC_BASE_URL at.
 func checkSwitch(cfg config.Config) rung {
 	const name = "switch"
 
-	// The switch is the proxy's worker leg: Claude Code speaks Anthropic, qwen speaks
-	// OpenAI, and the translation in between is the whole product. The worker-endpoint
-	// rung proves qwen answers; this one proves the translated path answers, which is
-	// the thing a session actually rides on. It is checked against THIS install's own
-	// daemon because that is what `run` points ANTHROPIC_BASE_URL at.
+	// ENABLED=false pins every request to the paid leg, /r/worker included, so the
+	// probe below would report a routing refusal as a broken switch. The config rung
+	// has already failed for the real reason; skipping keeps one cause to one FAIL.
+	if !cfg.Enabled {
+		return skip(name, "ENABLED=false — nothing routes to the worker, so there is no translated path to probe")
+	}
+
 	base := "http://127.0.0.1:" + cfg.Port
 	if _, err := net.DialTimeout("tcp", "127.0.0.1:"+cfg.Port, doctorTimeout); err != nil {
 		return fail(name, "no proxy listening on port "+cfg.Port,
 			"start it with `rig-move-llm serve` (or `rig-move-llm run -- claude`, which starts one)")
 	}
 
+	// The inbound model name is only echoed back in the Anthropic-shaped reply — the
+	// worker leg sends WORKER_MODEL to the endpoint regardless — so this string is a
+	// label for the log, not a routing key.
 	body, _ := json.Marshal(map[string]any{
-		"model":      ccModelOf(cfg),
+		"model":      "rig-doctor-probe",
 		"max_tokens": 1,
 		"messages":   []map[string]string{{"role": "user", "content": "ping"}},
 	})
@@ -270,93 +279,13 @@ func checkSwitch(cfg config.Config) rung {
 	return pass(name, "the proxy's worker leg answers Anthropic-format on "+base)
 }
 
-func ccModelOf(cfg config.Config) string {
-	if m := strings.TrimSpace(cfg.CCModel); m != "" {
-		return m
-	}
-	return "haiku"
-}
-
-// --- rung 4: workspace trust ---------------------------------------------
-
-func checkWorkspaceTrust(cwd string) rung {
-	const name = "workspace trust"
-	if cwd == "" {
-		return fail(name, "cannot resolve the working directory", "run doctor from inside the project")
-	}
-	if !workspaceTrusted(cwd) {
-		return fail(name, "Claude Code does not trust "+cwd+" — it will not load rig's MCP server here",
-			"run `rig-move-llm init --trust-workspace`, or open the dir in Claude Code once and accept the prompt")
-	}
-	return pass(name, "granted for "+cwd)
-}
-
 // commandMentionsRig reports whether a command string references the rig binary.
+// Used by uninstall to recognise a hook an older rig installed.
 func commandMentionsRig(cmd string) bool {
 	return strings.Contains(cmd, "rig-move-llm")
 }
 
-// getSettingsPaths returns all candidate settings.json and settings.local.json
-// paths for the given repo and home directories. Only paths that actually exist
-// are included.
-func getSettingsPaths(repo, home string) []string {
-	var paths []string
-	for _, base := range []string{repo, home} {
-		for _, name := range []string{"settings.json", "settings.local.json"} {
-			p := filepath.Join(base, ".claude", name)
-			if _, err := os.Stat(p); err == nil {
-				paths = append(paths, p)
-			}
-		}
-	}
-	return paths
-}
-
-// --- rung 5: the command the MCP entry names is resolvable ----------------
-
-// workerMCPCommand reads back the registration rig actually wrote, rather than
-// assuming what it would have written: the point of the rung is to check the
-// file on disk, which may be from an older install or hand-edited.
-func workerMCPCommand() (cmd, source string) {
-	type entry struct {
-		Command string `json:"command"`
-	}
-	// Project scope first — a project-root .mcp.json wins for this directory.
-	if data, err := os.ReadFile(".mcp.json"); err == nil {
-		var f struct {
-			MCPServers map[string]entry `json:"mcpServers"`
-		}
-		if json.Unmarshal(data, &f) == nil {
-			if e, ok := f.MCPServers["worker"]; ok && e.Command != "" {
-				return e.Command, ".mcp.json"
-			}
-		}
-	}
-	if data, err := os.ReadFile(userClaudeJSON()); err == nil {
-		var f struct {
-			MCPServers map[string]entry `json:"mcpServers"`
-		}
-		if json.Unmarshal(data, &f) == nil {
-			if e, ok := f.MCPServers["worker"]; ok && e.Command != "" {
-				return e.Command, "~/.claude.json (user scope)"
-			}
-		}
-	}
-	return "", ""
-}
-
-// --- rung 6: the guards ---------------------------------------------------
-
-// envSource annotates a value with where it came from — a silent override is how
-// two runs get compared as if they were the same configuration.
-func envSource(key string) string {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		return " (env " + key + "=" + v + ")"
-	}
-	return ""
-}
-
-// --- rung 7: the MAIN leg can start a session at all ----------------------
+// --- rung 4: the MAIN leg can start a session at all ----------------------
 
 // checkMainAuth is the hole the other rungs left open. Measured
 // 2026-07-30: an install answered all-PASS in a HOME where `claude` had never

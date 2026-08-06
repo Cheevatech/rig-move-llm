@@ -23,29 +23,27 @@ type initOpts struct {
 	workerKey    string
 	mainUpstream string
 	port         string
-	ccBase       string // RIG_CC_BASE_URL — the endpoint the switch points claude -p at
-	ccModel      string // RIG_CC_MODEL (default haiku)
-	enabled      bool   // ENABLED written to config; false = wired but inert (Claude Code runs normally)
+	enabled      bool // ENABLED written to config; false = wired but inert (Claude Code runs normally)
 	service      bool
 	force        bool
 	noDetect     bool
 }
 
-// cmdInit bootstraps a scope: it writes the config file and wires Claude Code
-// (permissions + the switch's MCP entry) so that a plain `claude`
-// launches a working hybrid. Local (default) touches only this project; --global
-// touches ~/.claude and applies to every project (the "follows you" mode).
+// cmdInit bootstraps a scope. It writes exactly one file — config.env — and, for a
+// project scope, registers the directory in the daemon's fail-closed allowlist. It
+// writes no hooks, no CLAUDE.md, no MCP servers and no Claude Code settings: since
+// #68 the product is the proxy, and a session reaches it through `run`, not through
+// wiring left in the user's config. Local (default) touches only this project;
+// --global writes ~/.rig-move-llm and applies wherever no local scope overrides it.
 func cmdInit(args []string) int {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
-	global := fs.Bool("global", false, "install for all projects (~/.claude + ~/.rig-move-llm)")
+	global := fs.Bool("global", false, "install for all projects (~/.rig-move-llm)")
 	backend := fs.String("backend", "", "worker backend: "+strings.Join(config.BackendNames(), "|"))
 	workerBase := fs.String("worker-base", "", "worker OpenAI-compatible base URL (e.g. http://localhost:11434/v1)")
 	workerModel := fs.String("worker-model", "", "worker model name")
 	workerKey := fs.String("worker-key", "", "worker API key (optional for local models)")
 	mainUpstream := fs.String("main-upstream", "https://api.anthropic.com", "paid (main-leg) upstream")
 	port := fs.String("port", "4000", "proxy listen port")
-	ccBase := fs.String("cc-base-url", "", "Anthropic-format base URL the switch points `claude -p` at")
-	ccModel := fs.String("cc-model", "", "model name the subprocess runs as (default haiku)")
 	force := fs.Bool("force", false, "overwrite an existing config file")
 	noDetect := fs.Bool("no-detect", false, "skip probing for a local worker endpoint")
 	svc := fs.Bool("service", false, "install an OS service so the proxy survives reboots (requires --global)")
@@ -73,7 +71,7 @@ func cmdInit(args []string) int {
 	return applyInit(initOpts{
 		global: *global, backend: *backend, workerBase: *workerBase,
 		workerModel: *workerModel, workerKey: *workerKey, mainUpstream: *mainUpstream,
-		port: *port, ccBase: *ccBase, ccModel: *ccModel,
+		port: *port,
 		// A worker endpoint was configured -> enable; otherwise stay inert.
 		enabled: *workerBase != "" || *backend != "",
 		service: *svc, force: *force, noDetect: *noDetect,
@@ -101,7 +99,6 @@ func applyInit(o initOpts) int {
 		if err := os.WriteFile(cfgPath, []byte(renderConfigEnv(configEnvVals{
 			backend: o.backend, workerBase: o.workerBase, workerModel: o.workerModel,
 			workerKey: o.workerKey, mainUpstream: o.mainUpstream, port: o.port,
-			ccBase: o.ccBase, ccModel: o.ccModel,
 			enabled: o.enabled,
 		})), 0o600); err != nil {
 			fmt.Fprintln(os.Stderr, "init: write config:", err)
@@ -128,15 +125,9 @@ func applyInit(o initOpts) int {
 		fmt.Println("registered", canon, "in", config.ProjectsPath())
 	}
 
-	// 2. Claude Code wiring (permissions + MCP pre-approve). No hooks since S4.
-
-	// 4b. Keep rig's own files out of git's view of the user's work. They are
-	// wiring, not changes: an untracked .claude/ and .mcp.json otherwise show up
-	// in the worker's returned diff as if the worker had authored them (#26), and
-	// `git stash -u` — which the proof-retry protocol uses to reach a red state —
-	// would sweep away rig's own config mid-run. .git/info/exclude is the right
-	// home: it is local and never committed, so rig does not edit a .gitignore the
-	// user owns and shares.
+	// 2. Keep rig's own files out of git's view of the user's work. They are wiring,
+	// not changes, and .git/info/exclude is the right home for that: it is local and
+	// never committed, so rig does not edit a .gitignore the user owns and shares.
 	if canon, err := config.CanonicalPath("."); err == nil {
 		if added, err := excludeRigArtifacts(canon); err != nil {
 			fmt.Fprintln(os.Stderr, "init: git exclude:", err)
@@ -145,7 +136,7 @@ func applyInit(o initOpts) int {
 		}
 	}
 
-	// 5. OS service (optional): supervise `serve` across reboots.
+	// 3. OS service (optional): supervise `serve` across reboots.
 	if o.service {
 		self, err := os.Executable()
 		if err != nil {
@@ -165,17 +156,19 @@ func applyInit(o initOpts) int {
 	if o.global {
 		scope = "global (all projects — follows you)"
 	}
-	state := "ENABLED (offload active)"
+	state := "ENABLED (the switch can route to your worker)"
 	if !o.enabled {
-		state = "DISABLED (Claude Code runs normally; set a worker endpoint + ENABLED=true in config.env to turn it on)"
+		state = "DISABLED (every request pins to your paid model; set a worker endpoint, then `rig-move-llm enable`)"
 	}
-	fmt.Printf("\ninit complete — scope: %s\nstatus: %s\nlaunch with:  claude\n", scope, state)
+	// The launch line is load-bearing: rig writes no Claude Code settings, so a bare
+	// `claude` does not go through the proxy at all. `run` is what sets
+	// ANTHROPIC_BASE_URL for that one process.
+	fmt.Printf("\ninit complete — scope: %s\nstatus: %s\n\nlaunch with:  rig-move-llm run -- claude\nthen flip:    rig-move-llm qwen on   (and `qwen off` to hand it back)\n", scope, state)
 	return 0
 }
 
 type configEnvVals struct {
 	backend, workerBase, workerModel, workerKey, mainUpstream, port string
-	ccBase, ccModel                                                 string
 	enabled                                                         bool
 }
 
@@ -198,8 +191,9 @@ func renderConfigEnv(v configEnvVals) string {
 	kv("worker model name", "WORKER_MODEL", v.workerModel)
 	kv("worker API key (optional for local models; use an OpenRouter key for OpenRouter)", "WORKER_API_KEY", v.workerKey)
 	b.WriteString("\n")
-	kv("Anthropic-format base URL the switch points `claude -p` at — REQUIRED (it keeps the worker leg off the paid account; the switch refuses to run without it)", "RIG_CC_BASE_URL", v.ccBase)
-	kv("model name the subprocess runs as (default haiku — the worker-leg routing key on the shim)", "RIG_CC_MODEL", v.ccModel)
+	// The switch itself. Written explicitly (not left to the default) so that reading
+	// config.env tells you which brain is answering without running anything.
+	kv("THE SWITCH: true = the next turn runs on the worker; false = it runs on your paid model. Prefer `rig-move-llm qwen on|off` over editing this by hand.", "RIG_ROUTE_ALL_TO_WORKER", "false")
 	b.WriteString("\n")
 	// Master on/off. Written explicitly so the state is unambiguous: false = wired
 	// but inert (Claude Code runs normally), flip to true after setting an endpoint.
@@ -207,17 +201,12 @@ func renderConfigEnv(v configEnvVals) string {
 	if v.enabled {
 		enabled = "true"
 	}
-	kv("master switch: true = offload active; false = Claude Code runs normally. Skipping the worker in setup leaves this false.", "ENABLED", enabled)
+	kv("master switch: false pins every request to your paid model, whatever the switch above says. Skipping the worker in setup leaves this false.", "ENABLED", enabled)
 	kv("paid main-leg upstream (raw passthrough, OAuth untouched)", "MAIN_UPSTREAM_URL", v.mainUpstream)
 	kv("proxy listen port", "PORT", v.port)
 	b.WriteString("\n")
-	kv("worker health-check path probed at each message start (default /v1/models; set off to disable — call-time fallback still applies)", "WORKER_HEALTH_PATH", "")
-	kv("health probe timeout in ms (default 2000)", "WORKER_HEALTH_TIMEOUT_MS", "")
-	kv("reuse a health probe result for this many seconds (default 15)", "WORKER_HEALTH_CACHE_SEC", "")
-	b.WriteString("\n")
 	kv("set LOG_BODIES=1 to log full request/response bodies (default: metadata only)", "LOG_BODIES", "")
 	kv("size cap in MB for logs/requests.jsonl; past it the oldest half is compacted away (default 50)", "LOG_MAX_MB", "")
-	kv("MCP servers the MAIN agent may still use, comma-separated (default: none)", "MAIN_SHARED_MCP", "")
 	return b.String()
 }
 
@@ -272,30 +261,3 @@ const steerImportFile = "rig-move-llm.md"
 // more — the switch has no tool to point Claude at — but a machine that ran an
 // older rig has one on disk, and uninstall is the only thing that removes it.
 const steerSentinel = "<!-- rig-move-llm:delegate-steer -->"
-
-// importedBy reports whether the memory file already pulls in name via @import,
-// so a re-run says "updated" instead of repeating instructions already followed.
-func importedBy(memPath, name string) bool {
-	data, err := os.ReadFile(memPath)
-	if err != nil {
-		return false
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.TrimSpace(line) == "@"+name {
-			return true
-		}
-	}
-	return false
-}
-
-// steerSentinel marks a file as rig-move-llm-authored so uninstall can remove it
-// without touching a user's own memory file. The string is unchanged from the
-// enforcement era on purpose: an install made by an older rig carries it too, and
-// uninstall has to recognise those as ours.
-
-// qwenCommandMD is the direct button. It calls the same one tool the steer names,
-// so there are not two surfaces to keep in sync (S1).
-//
-// It leaks into the worker's own slash_commands list — every one of the user's
-// commands does, verified in the init event — but a slash command is inert until
-// somebody types it, and nobody types this one inside a worker session.

@@ -39,14 +39,20 @@ func setEnabled(name string, args []string, on bool) int {
 		scope = "local (this project)"
 	}
 	if on {
-		fmt.Printf("ENABLED=true — offload active for %s\n%s\n", scope, path)
-		// Enabling without a worker endpoint means the switch has nothing
-		// to delegate to; warn rather than silently break the next session.
-		if config.Load().WorkerAPIBase == "" {
-			fmt.Println("WARNING: no worker endpoint resolves — set WORKER_API_BASE (run `rig-move-llm config --open`) or the hook will block tools with no worker to run them.")
+		fmt.Printf("ENABLED=true — the switch may route to the worker for %s\n%s\n", scope, path)
+		cfg := config.Load()
+		// Enabling without a worker endpoint means the switch has nothing behind it;
+		// say so now rather than let every flipped turn fail mid-task.
+		if cfg.WorkerAPIBase == "" {
+			fmt.Println("WARNING: no worker endpoint resolves — set WORKER_API_BASE (run `rig-move-llm config --open`)")
+		}
+		// ENABLED is permission, not the flip itself. Saying so here is what keeps
+		// the two switches from being confused for one.
+		if !cfg.RouteAllToWorker {
+			fmt.Println("note: turns still run on your paid model until you run `rig-move-llm qwen on`")
 		}
 	} else {
-		fmt.Printf("ENABLED=false — Claude Code runs normally for %s (no offload)\n%s\n", scope, path)
+		fmt.Printf("ENABLED=false — every request pins to your paid model for %s\n%s\n", scope, path)
 	}
 	return 0
 }
@@ -70,8 +76,14 @@ func cmdConfig(args []string) int {
 	globalPath := filepath.Join(config.GlobalDir(), config.ConfigFile)
 	localPath := filepath.Join(config.LocalDir(), config.ConfigFile)
 
+	brain := "your paid model"
+	if cfg.Enabled && cfg.RouteAllToWorker {
+		brain = "the worker"
+	}
 	fmt.Printf("effective config (as seen from %s):\n", cwd)
+	fmt.Printf("  next turn runs on: %s\n", brain)
 	fmt.Printf("  enabled:        %v\n", cfg.Enabled)
+	fmt.Printf("  switch (qwen):  %v\n", cfg.RouteAllToWorker)
 	if cfg.WorkerAPIBase != "" {
 		fmt.Printf("  worker:         %s%s backend=%s\n", cfg.WorkerAPIBase, modelNote(cfg.WorkerModel), cfg.Backend.Name)
 	} else {
@@ -116,7 +128,7 @@ func printScope(label, path string) {
 // (they override both file scopes).
 func envOverrides() []string {
 	var out []string
-	for _, k := range []string{"ENABLED", "WORKER_API_BASE", "WORKER_MODEL", "WORKER_BACKEND", "WORKER_API_KEY", "WORKER_HEALTH_PATH", "PORT", "MAIN_UPSTREAM_URL", "RIG_WORKER_ENGINE", "RIG_CC_BASE_URL", "RIG_CC_MODEL"} {
+	for _, k := range []string{"ENABLED", "RIG_ROUTE_ALL_TO_WORKER", "WORKER_API_BASE", "WORKER_MODEL", "WORKER_BACKEND", "WORKER_API_KEY", "PORT", "MAIN_UPSTREAM_URL", "LOG_BODIES", "LOG_MAX_MB"} {
 		if _, ok := os.LookupEnv(k); ok {
 			out = append(out, k)
 		}

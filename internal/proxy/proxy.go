@@ -1,18 +1,17 @@
-// Package proxy is the rig-move-llm observability layer. It sits at
-// ANTHROPIC_BASE_URL and forwards Claude Code's traffic verbatim to the paid
-// Anthropic upstream (OAuth / anthropic-beta headers preserved, streamed
-// unbuffered), tee-scanning completions for token usage so the ledger can report
-// what the paid (MAIN) leg spent.
+// Package proxy is the switch. It sits at ANTHROPIC_BASE_URL and decides, per
+// request, which model answers: the paid Anthropic upstream (forwarded verbatim,
+// OAuth / anthropic-beta headers preserved, streamed unbuffered, tee-scanned for
+// token usage) or the user's own worker endpoint (translated Anthropic <-> OpenAI,
+// folded into a separate ledger and never billed to the paid account).
 //
-// It is MAIN-leg only. Offload to a worker model is NOT done here: on CC 2.1.x
-// native subagents run in-process and never egress to a base-URL proxy, so the
-// old worker leg (haiku-model interception -> OpenAI translation -> local worker)
-// could never see real subagent traffic and was removed in ticket P10-B. Offload
-// now runs out-of-process through the worker MCP tool (mcp__worker__implement,
-// internal/thin), whose token cost is off the paid ledger by construction.
+// Claude Code is never told the difference, which is the whole point: the flip
+// lands mid-session, in the same conversation, with the context intact. Config is
+// re-read from disk on every request (no cache), so `rig qwen on` takes effect on
+// the very next turn of a session that is already running.
 //
-// Per-project routing (the /p/<id> path prefix, allowlist-gated) still applies:
-// it selects which project's config/upstream a request uses.
+// Two path prefixes shape a request before it is routed, and they compose in this
+// order: /r/<leg> forces one leg for this request alone, and /p/<id> selects which
+// registered project's config applies (allowlist-gated, fail-closed).
 package proxy
 
 import (
@@ -126,9 +125,10 @@ func (s *Server) resolveProject(w http.ResponseWriter, r *http.Request) (cfg con
 
 // routePrefix carries a per-invocation leg override in the base URL path:
 // /r/worker/... forces the qwen (worker) leg; /r/main/... forces the verbatim
-// Anthropic (paid) leg. The switch sets it — RIG_CC_BASE_URL normally ends in
-// /r/worker — so one shared daemon serves both legs without a restart
-// routes without a restart or a global flag flip. It is stripped before /p/<id>.
+// Anthropic (paid) leg. One shared daemon therefore serves both legs at once,
+// without a restart and without flipping the global flag — which is what lets a
+// measurement run both arms against the same process. It is stripped before
+// /p/<id>. ENABLED=false overrides it: see handle.
 const routePrefix = "/r/"
 
 // stripRoutePrefix removes a leading /r/<leg>/ segment from the request path and
@@ -160,10 +160,13 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Effective routing: an explicit /r/<leg> wins; otherwise the RouteAllToWorker
-	// flag decides. /r/main always reaches Claude even when the flag is globally on,
-	// so a request aimed at the paid leg is never trapped on the worker leg.
-	routeWorker := leg == "worker" || (leg == "" && cfg.RouteAllToWorker)
+	// Effective routing. ENABLED is the master switch and it is checked FIRST: with
+	// it false NOTHING reaches the worker, not even an explicit /r/worker, because
+	// `rig disable` prints "Claude Code runs normally" and that has to be true. Below
+	// it, an explicit /r/<leg> wins over the RouteAllToWorker flag — /r/main always
+	// reaches Claude even while the flag is on, so a request aimed at the paid leg is
+	// never trapped on the worker leg.
+	routeWorker := cfg.Enabled && (leg == "worker" || (leg == "" && cfg.RouteAllToWorker))
 
 	if r.Method == http.MethodPost && r.URL.Path == "/v1/messages" {
 		body, err := io.ReadAll(r.Body)

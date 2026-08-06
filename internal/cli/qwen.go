@@ -49,8 +49,14 @@ func cmdQwen(args []string) int {
 		fmt.Printf("qwen ON for %s — the next turn runs on the worker\n%s\n", scope, path)
 		// A flag with nothing behind it turns every following turn into an error the
 		// user has to read mid-task, so say it now instead.
-		if config.Load().WorkerAPIBase == "" {
+		cfg := config.Load()
+		if cfg.WorkerAPIBase == "" {
 			fmt.Println("WARNING: no worker endpoint resolves — set WORKER_API_BASE first (`rig-move-llm config --open`)")
+		}
+		// ENABLED outranks this flag in the proxy, so an ON that cannot take effect
+		// has to say so here — otherwise it silently reads as a flip that happened.
+		if !cfg.Enabled {
+			fmt.Println("WARNING: ENABLED=false, so turns still run on your paid model — run `rig-move-llm enable` to let the switch take effect")
 		}
 	case "off":
 		if err := setConfigKey(path, "RIG_ROUTE_ALL_TO_WORKER", "false"); err != nil {
@@ -63,6 +69,9 @@ func cmdQwen(args []string) int {
 		state := "OFF (paid model)"
 		if cfg.RouteAllToWorker {
 			state = "ON (worker)"
+			if !cfg.Enabled {
+				state = "ON, but ENABLED=false so turns still run on the paid model"
+			}
 		}
 		fmt.Printf("qwen: %s\nworker: %s\nconfig: %s\n",
 			state, orNone(cfg.WorkerAPIBase), path)

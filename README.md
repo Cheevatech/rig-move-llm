@@ -213,7 +213,9 @@ pkg/translate/      Anthropic ⇄ OpenAI message + stream translation
 **Removed commands:** `rig hook`, `rig worker`, `rig cascade`, `rig teammate-exec` (with the enforcement layer); `rig thin-worker`, `rig thin-supervise`, `rig watch` (with the delegate arm).
 **Removed config keys:** `GATE_MODE`, `VERIFY_CMD`, `RIG_MAX_DELEGATE_ROUNDS`, `RIG_THIN_STALL`, `RIG_THIN_WALL`, `RIG_CC_BASE_URL`, `RIG_CC_MODEL`, `RIG_WORKER_ENGINE`, `MAIN_SHARED_MCP`, `WORKER_HEALTH_PATH`, `WORKER_HEALTH_TIMEOUT_MS`, `WORKER_HEALTH_CACHE_SEC`. A key that is still parsed but no longer read is worse than a deleted one: it looks like a setting you can act on.
 
-**Migration:** none needed. `uninstall` cleans up an old install — including files written by *older* rigs (the enforcement-era hooks, output styles, `CLAUDE.md` steer and `/qwen` command) — while leaving hooks and permissions you added yourself untouched. `init` writes the new one.
+**Migration:** `uninstall` cleans up an old install — including files written by *older* rigs (the enforcement-era hooks, output styles, `CLAUDE.md` steer and `/qwen` command) — while leaving hooks and permissions you added yourself untouched. `init` writes the new one.
+
+One upgrade case needs a look rather than a command. `ENABLED` used to be read only by `config` and `doctor`; it now gates routing. If your `config.env` carries `ENABLED=false` from an older install *and* you were relying on `RIG_ROUTE_ALL_TO_WORKER=true` to offload, offload will stop after upgrading and every turn will quietly run on your paid model. Nothing breaks and no work is lost — it fails toward the expensive-but-correct side — but check `rig-move-llm config` once after upgrading. It prints which model answers the next turn and says so explicitly when the two switches disagree.
 
 ## Build
 

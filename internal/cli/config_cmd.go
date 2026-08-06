@@ -76,9 +76,14 @@ func cmdConfig(args []string) int {
 	globalPath := filepath.Join(config.GlobalDir(), config.ConfigFile)
 	localPath := filepath.Join(config.LocalDir(), config.ConfigFile)
 
+	// Two booleans decide one thing, so print the ANSWER first and the inputs after.
+	// The case worth naming is the disagreement — a switch that is on while ENABLED
+	// is off reads as "I flipped it and nothing happened" unless something says why.
 	brain := "your paid model"
 	if cfg.Enabled && cfg.RouteAllToWorker {
 		brain = "the worker"
+	} else if cfg.RouteAllToWorker {
+		brain = "your paid model — the switch is ON but ENABLED=false overrides it (`rig-move-llm enable`)"
 	}
 	fmt.Printf("effective config (as seen from %s):\n", cwd)
 	fmt.Printf("  next turn runs on: %s\n", brain)

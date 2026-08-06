@@ -148,3 +148,68 @@ func postPath(t *testing.T, h http.Handler, path, body string) int {
 	h.ServeHTTP(rw, req)
 	return rw.Code
 }
+
+// TestFlipReachesUnprefixedRequests is the regression test for a switch that
+// reported success and did not switch. A request without /p/<id> used to be
+// served from the config the daemon booted with, so `rig qwen on` — which writes
+// the flag to disk — never reached any session that was not launched inside a
+// REGISTERED project. Measured before the fix: flag on, plain request, still
+// answered by the paid upstream.
+func TestFlipReachesUnprefixedRequests(t *testing.T) {
+	var workerHit, mainHit bool
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		workerHit = true
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	}))
+	defer worker.Close()
+	main := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mainHit = true
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"id":"x","type":"message","role":"assistant","content":[],"usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer main.Close()
+
+	// The daemon's scope is a temp HOME whose config.env is edited mid-flight,
+	// exactly as `rig qwen on` edits it.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, config.DirName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, config.ConfigFile)
+	write := func(flag string) {
+		body := "ENABLED=true\nMAIN_UPSTREAM_URL=" + main.URL +
+			"\nWORKER_API_BASE=" + worker.URL + "\nWORKER_MODEL=qwen\nRIG_ROUTE_ALL_TO_WORKER=" + flag + "\n"
+		if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Boot with the flag OFF, so the boot config says "paid leg". The test's own
+	// cwd carries no .rig-move-llm, so Load() resolves the temp HOME set above —
+	// which is the layering a globally-installed daemon actually sees.
+	write("false")
+	rec, _ := stats.NewRecorder(t.TempDir(), false)
+	h := (&Server{cfg: config.Load(), reload: config.Load, rec: rec}).Handler()
+
+	body := `{"model":"claude-opus-4-8","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`
+	workerHit, mainHit = false, false
+	if code := postPath(t, h, "/v1/messages", body); code != http.StatusOK {
+		t.Fatalf("flag off: status %d", code)
+	}
+	if !mainHit || workerHit {
+		t.Fatalf("flag off: mainHit=%v workerHit=%v, want main only", mainHit, workerHit)
+	}
+
+	// Flip on disk while the server keeps running — no restart, as `qwen on` promises.
+	write("true")
+	workerHit, mainHit = false, false
+	if code := postPath(t, h, "/v1/messages", body); code != http.StatusOK {
+		t.Fatalf("flag on: status %d", code)
+	}
+	if !workerHit || mainHit {
+		t.Errorf("flag on: workerHit=%v mainHit=%v — the flip did not reach an unprefixed request", workerHit, mainHit)
+	}
+}

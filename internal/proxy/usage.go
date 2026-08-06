@@ -8,9 +8,18 @@ import (
 
 // anthUsage is the usage sub-object carried by Anthropic message events and the
 // non-stream response.
+//
+// The three input fields are separate on the wire because they are separate on
+// the bill — a cache read is roughly a tenth of fresh input, a cache write
+// slightly more than it. Reading only input_tokens is how this ledger came to
+// report 2 for a turn whose real input was 57,951: on a warm Claude Code session
+// almost the entire prompt is a cache read, and input_tokens counts only what
+// was NOT served from cache.
 type anthUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens      int `json:"input_tokens"`
+	CacheReadTokens  int `json:"cache_read_input_tokens"`
+	CacheWriteTokens int `json:"cache_creation_input_tokens"`
+	OutputTokens     int `json:"output_tokens"`
 }
 
 // anthEvent is the subset of an Anthropic streaming event (or non-stream
@@ -29,10 +38,12 @@ type anthEvent struct {
 // SSE it scans complete `data:` lines and drops them; for a non-stream JSON
 // response it accumulates the (single, small) body and parses it on close.
 type mainUsageScanner struct {
-	stream bool
-	buf    []byte
-	in     int
-	out    int
+	stream    bool
+	buf       []byte
+	in        int
+	cacheRead int
+	cacheWrit int
+	out       int
 }
 
 func newMainUsageScanner(contentType string) *mainUsageScanner {
@@ -72,7 +83,7 @@ func (m *mainUsageScanner) parseLine(line []byte) {
 }
 
 // apply folds any usage counts present in the event into the running totals.
-// input_tokens arrives on message_start; output_tokens is cumulative and last
+// The input counts arrive on message_start; output_tokens is cumulative and last
 // reported on message_delta, so later non-zero values overwrite earlier ones.
 func (m *mainUsageScanner) apply(ev anthEvent) {
 	for _, u := range []*anthUsage{usageOf(ev.Message), ev.Usage} {
@@ -81,6 +92,12 @@ func (m *mainUsageScanner) apply(ev anthEvent) {
 		}
 		if u.InputTokens > 0 {
 			m.in = u.InputTokens
+		}
+		if u.CacheReadTokens > 0 {
+			m.cacheRead = u.CacheReadTokens
+		}
+		if u.CacheWriteTokens > 0 {
+			m.cacheWrit = u.CacheWriteTokens
 		}
 		if u.OutputTokens > 0 {
 			m.out = u.OutputTokens
@@ -99,12 +116,16 @@ func usageOf(msg *struct {
 
 // close finalizes parsing and returns the extracted counts. A non-stream body is
 // a single JSON object parsed here; an SSE stream was parsed incrementally.
-func (m *mainUsageScanner) close() (in, out int) {
+//
+// The three input counts stay separate all the way out rather than being summed
+// here: they carry different prices, so a caller that wants volume can add them
+// and a caller that wants money cannot un-add them.
+func (m *mainUsageScanner) close() (in, cacheRead, cacheWrite, out int) {
 	if !m.stream {
 		var ev anthEvent
 		if json.Unmarshal(bytes.TrimSpace(m.buf), &ev) == nil {
 			m.apply(ev)
 		}
 	}
-	return m.in, m.out
+	return m.in, m.cacheRead, m.cacheWrit, m.out
 }

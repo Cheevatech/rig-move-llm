@@ -24,7 +24,7 @@ Plan and scope on Claude. Type `rig-move-llm qwen on`. The next turn is answered
 
 There is no second agent, no subprocess, no delegation, and no result to hand back and trust. Claude Code never learns that the model behind the endpoint changed; it keeps its own tools, its own permissions, and its own transcript.
 
-The flip is live because the proxy re-reads the project's config **fresh on every request** — no cache, no restart. `rig-move-llm qwen on` writes one key to `config.env`; the next HTTP request a running session makes picks it up.
+The flip is live because the proxy re-reads config **fresh on every request** — no cache, no restart, and no distinction between a registered project and a plain global install. `rig-move-llm qwen on` writes one key to `config.env`; the next HTTP request a running session makes picks it up.
 
 One static Go binary, stdlib only. Cross-compiles to macOS / Linux / Windows (amd64 + arm64) with no toolchain.
 
@@ -181,7 +181,16 @@ rig-move-llm stats --reset      # clear both
 Two caveats, both load-bearing:
 
 - **The ledger lives in the *daemon's* scope**, not the caller's. A global `serve` writes to `~/.rig-move-llm/stats.json` even for traffic from a project with its own local config. Run `stats` from the same scope the daemon booted in, or you will read an empty ledger and conclude nothing happened.
-- **`main_in` is undercounted.** The MAIN-leg scanner counts only uncached `input_tokens`, so on a cache-heavy session it reads far below the truth. `main_out`, `worker_in` and `worker_out` are accurate; the offload ratio inherits the same skew. Do not build a cost comparison on `main_in`.
+- **The paid leg's input is reported in three parts, because it is priced in three parts.** `stats` prints the total and then the split:
+
+  ```
+  main   (billed, Anthropic):    57951 in + 997 out = 58948 tok over 1 req
+           input split:          2 fresh + 56877 cache-read + 1072 cache-write
+  ```
+
+  A cache read costs roughly a tenth of fresh input and a cache write slightly more than it, so the three are kept apart in `stats.json` (`main_in`, `main_cache_read`, `main_cache_write`) rather than summed into one number that would read as if it were all full price. The worker leg has no equivalent split — an OpenAI-shaped `prompt_tokens` is already the whole prompt.
+
+  Before 0.8 only `main_in` was recorded, and on a warm Claude Code session that is nearly zero: the capture above was logged as **2 tokens** of input. Any comparison built on a pre-0.8 ledger is wrong by orders of magnitude; reset it with `rig-move-llm stats --reset`.
 
 ## Security posture
 

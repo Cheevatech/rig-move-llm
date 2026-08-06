@@ -44,13 +44,21 @@ const (
 // ledger mirrors the stats.json shape read by internal/cli.stats. The JSON field
 // tags MUST stay in sync with that struct.
 type ledger struct {
-	Since     string `json:"since"`
-	MainIn    int64  `json:"main_in"`
-	MainOut   int64  `json:"main_out"`
-	WorkerIn  int64  `json:"worker_in"`
-	WorkerOut int64  `json:"worker_out"`
-	NMain     int64  `json:"n_main"`
-	NWorker   int64  `json:"n_worker"`
+	Since string `json:"since"`
+	// MainIn is UNCACHED input only, matching Anthropic's own input_tokens. The
+	// cached halves are counted separately because they are priced separately —
+	// summing them here would misstate cost, and dropping them (which this ledger
+	// did until 0.8) misstates volume by orders of magnitude on a warm session.
+	MainIn        int64 `json:"main_in"`
+	MainCacheRead int64 `json:"main_cache_read"`
+	MainCacheWrit int64 `json:"main_cache_write"`
+	MainOut       int64 `json:"main_out"`
+	// The worker leg is OpenAI-shaped: prompt_tokens is the whole prompt with no
+	// cache split, so WorkerIn is already a total and has no cache companions.
+	WorkerIn  int64 `json:"worker_in"`
+	WorkerOut int64 `json:"worker_out"`
+	NMain     int64 `json:"n_main"`
+	NWorker   int64 `json:"n_worker"`
 }
 
 // Record is one request's accounting: appended to the JSONL log and folded into
@@ -61,7 +69,9 @@ type Record struct {
 	Endpoint  string // worker endpoint label serving the request ("" for plain main)
 	Routed    string // RoutedMain | RoutedWorker | RoutedDiverted ("" tolerated as main)
 	Model     string
-	InTokens  int
+	InTokens  int // uncached input (Anthropic input_tokens / OpenAI prompt_tokens)
+	CacheRead int // Anthropic cache_read_input_tokens (0 on the worker leg)
+	CacheWrit int // Anthropic cache_creation_input_tokens (0 on the worker leg)
 	OutTokens int
 	Millis    int64
 	Status    int
@@ -79,6 +89,8 @@ type logLine struct {
 	Routed   string `json:"routed,omitempty"`
 	Model    string `json:"model"`
 	InTok    int    `json:"in_tok"`
+	CacheRd  int    `json:"cache_read_tok,omitempty"`
+	CacheWr  int    `json:"cache_write_tok,omitempty"`
 	OutTok   int    `json:"out_tok"`
 	MS       int64  `json:"ms"`
 	Status   int    `json:"status"`
@@ -98,6 +110,7 @@ type Recorder struct {
 	logBodies   bool
 	maxLogBytes int64
 	dirty       bool
+	wrote       bool // this Recorder has written statsPath at least once (see honourResetLocked)
 
 	stop chan struct{}
 	done chan struct{}
@@ -149,6 +162,11 @@ func (r *Recorder) Record(rec Record) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	// Checked here and not only at flush time: a request arriving between the
+	// delete and the next flush would otherwise be folded into the totals that are
+	// about to be discarded, and the reset would eat it.
+	r.honourResetLocked()
+
 	line := logLine{
 		TS:       time.Now().UTC().Format(time.RFC3339),
 		Leg:      string(rec.Leg),
@@ -157,6 +175,8 @@ func (r *Recorder) Record(rec Record) {
 		Routed:   rec.Routed,
 		Model:    rec.Model,
 		InTok:    rec.InTokens,
+		CacheRd:  rec.CacheRead,
+		CacheWr:  rec.CacheWrit,
 		OutTok:   rec.OutTokens,
 		MS:       rec.Millis,
 		Status:   rec.Status,
@@ -172,6 +192,8 @@ func (r *Recorder) Record(rec Record) {
 	switch rec.Leg {
 	case LegMain:
 		r.led.MainIn += int64(rec.InTokens)
+		r.led.MainCacheRead += int64(rec.CacheRead)
+		r.led.MainCacheWrit += int64(rec.CacheWrit)
 		r.led.MainOut += int64(rec.OutTokens)
 		r.led.NMain++
 	case LegWorker:
@@ -349,9 +371,9 @@ func (r *Recorder) WindowTokens(window time.Duration) (workerTok, divertedTok in
 		}
 		switch l.Routed {
 		case RoutedWorker:
-			workerTok += int64(l.InTok + l.OutTok)
+			workerTok += int64(l.InTok + l.CacheRd + l.CacheWr + l.OutTok)
 		case RoutedDiverted:
-			divertedTok += int64(l.InTok + l.OutTok)
+			divertedTok += int64(l.InTok + l.CacheRd + l.CacheWr + l.OutTok)
 		}
 	}
 	return workerTok, divertedTok
@@ -384,7 +406,32 @@ func (r *Recorder) Flush() error {
 	return r.flushLocked()
 }
 
+// honourResetLocked zeroes the in-memory ledger when the file it mirrors has been
+// removed from underneath it. `stats --reset` runs in the CLI process and can only
+// delete the file; without this the daemon kept its own totals and the next request
+// resurrected them — measured: reset, then one request, and a 1-request ledger came
+// back reading 2 requests. The file IS the ledger, so a caller that removes it has
+// said what they meant.
+//
+// Only a file this Recorder has already written counts: a daemon that has not
+// flushed yet has nothing to honour, and treating "absent" as "reset" there would
+// zero a ledger loaded at boot before its first flush.
+//
+// Called from both Record and flush. The stat() costs nothing next to the JSONL
+// append the same call already performs.
+func (r *Recorder) honourResetLocked() {
+	if !r.wrote {
+		return
+	}
+	if _, err := os.Stat(r.statsPath); err == nil || !os.IsNotExist(err) {
+		return
+	}
+	r.led = ledger{Since: time.Now().UTC().Format(time.RFC3339)}
+	r.wrote = false
+}
+
 func (r *Recorder) flushLocked() error {
+	r.honourResetLocked()
 	if !r.dirty {
 		return nil
 	}
@@ -400,6 +447,7 @@ func (r *Recorder) flushLocked() error {
 		return err
 	}
 	r.dirty = false
+	r.wrote = true
 	return nil
 }
 

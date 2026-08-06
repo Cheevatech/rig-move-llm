@@ -34,7 +34,13 @@ var httpClient = &http.Client{}
 
 // Server holds the resolved configuration and serves the routing handler.
 type Server struct {
-	cfg     config.Config
+	cfg config.Config
+	// reload re-reads the daemon's own scope from disk for requests that carry no
+	// /p/<id>. A nil reload means "cfg is the whole truth", which is what a test
+	// injecting a fixture wants — without that escape hatch every such test would
+	// silently pick up the developer's real config.env and egress to the real
+	// upstream. New() wires the production implementation.
+	reload  func() config.Config
 	rec     *stats.Recorder // observability recorder; nil disables recording
 	httpSrv *http.Server
 }
@@ -42,7 +48,7 @@ type Server struct {
 // New builds a Server from resolved configuration. It opens the observability
 // recorder; if that fails the server still runs, just without recording.
 func New(cfg config.Config) *Server {
-	s := &Server{cfg: cfg}
+	s := &Server{cfg: cfg, reload: config.Load}
 	if rec, err := stats.NewRecorder(cfg.DataDir, cfg.LogBodies); err == nil {
 		rec.SetMaxLogBytes(int64(cfg.LogMaxMB) << 20)
 		s.rec = rec
@@ -94,10 +100,25 @@ const projectPrefix = "/p/"
 // resolveProject strips a /p/<id> prefix from the request, validates the decoded
 // project dir against the fail-closed allowlist, and loads that project's config
 // fresh (no cache). It returns ok=false after writing the error response itself.
-// Without a prefix, the daemon's boot config applies unchanged.
+// Without a prefix the daemon's OWN scope is re-read, equally fresh — see below
+// for why that is not the same as reusing the config it booted with.
 func (s *Server) resolveProject(w http.ResponseWriter, r *http.Request) (cfg config.Config, project string, ok bool) {
 	if !strings.HasPrefix(r.URL.Path, projectPrefix) {
-		return s.cfg, "", true
+		// Re-read the daemon's own scope, same as the /p/<id> path below. Returning
+		// the boot config here meant `rig qwen on` silently did nothing for any
+		// session not launched inside a REGISTERED project: the flag reached the
+		// file, the daemon never looked at the file again, and the flip reported
+		// success while every turn kept going to the paid leg. Measured before the
+		// fix: flag on, plain request, still answered by the main upstream.
+		//
+		// The listener and the ledger belong to the process, so those two survive
+		// the reload — everything else is whatever is on disk right now.
+		if s.reload == nil {
+			return s.cfg, "", true
+		}
+		fresh := s.reload()
+		fresh.Port, fresh.DataDir = s.cfg.Port, s.cfg.DataDir
+		return fresh, "", true
 	}
 	id, tail, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, projectPrefix), "/")
 
@@ -296,13 +317,15 @@ func (s *Server) handleMain(w http.ResponseWriter, r *http.Request, cfg config.C
 	}
 
 	if scan != nil {
-		in, out := scan.close()
+		in, cacheRead, cacheWrite, out := scan.close()
 		s.rec.Record(stats.Record{
 			Leg:       stats.LegMain,
 			Project:   project,
 			Routed:    stats.RoutedMain,
 			Model:     model,
 			InTokens:  in,
+			CacheRead: cacheRead,
+			CacheWrit: cacheWrite,
 			OutTokens: out,
 			Millis:    time.Since(start).Milliseconds(),
 			Status:    resp.StatusCode,

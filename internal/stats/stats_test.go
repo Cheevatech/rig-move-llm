@@ -228,3 +228,50 @@ func TestWindowTokens(t *testing.T) {
 		t.Errorf("nil recorder WindowTokens = %d/%d, want 0/0", w, d)
 	}
 }
+
+// TestResetWhileRunningIsHonoured is the regression test for a reset that did not
+// reset. `stats --reset` runs in the CLI process and can only delete stats.json;
+// the daemon kept its own totals in memory, so the next request wrote them back
+// with the new one added. Measured before the fix: reset a 1-request ledger, send
+// one request, read back 2 requests.
+func TestResetWhileRunningIsHonoured(t *testing.T) {
+	dir := t.TempDir()
+	r, err := NewRecorder(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+
+	r.Record(Record{Leg: LegMain, Routed: RoutedMain, InTokens: 100, OutTokens: 10})
+	if err := r.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	statsPath := filepath.Join(dir, "stats.json")
+	if _, err := os.Stat(statsPath); err != nil {
+		t.Fatalf("ledger should exist before the reset: %v", err)
+	}
+
+	// What `stats --reset` does, from the other process.
+	if err := os.Remove(statsPath); err != nil {
+		t.Fatal(err)
+	}
+
+	r.Record(Record{Leg: LegMain, Routed: RoutedMain, InTokens: 7, OutTokens: 3})
+	if err := r.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := os.ReadFile(statsPath)
+	if err != nil {
+		t.Fatalf("ledger should have been rewritten: %v", err)
+	}
+	var led ledger
+	if err := json.Unmarshal(b, &led); err != nil {
+		t.Fatal(err)
+	}
+	if led.NMain != 1 || led.MainIn != 7 || led.MainOut != 3 {
+		t.Errorf("after reset got n=%d in=%d out=%d, want 1/7/3 — the pre-reset totals came back",
+			led.NMain, led.MainIn, led.MainOut)
+	}
+}

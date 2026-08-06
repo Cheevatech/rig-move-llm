@@ -110,6 +110,7 @@ type Recorder struct {
 	logBodies   bool
 	maxLogBytes int64
 	dirty       bool
+	wrote       bool // this Recorder has written statsPath at least once (see honourResetLocked)
 
 	stop chan struct{}
 	done chan struct{}
@@ -160,6 +161,11 @@ func (r *Recorder) Record(rec Record) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	// Checked here and not only at flush time: a request arriving between the
+	// delete and the next flush would otherwise be folded into the totals that are
+	// about to be discarded, and the reset would eat it.
+	r.honourResetLocked()
 
 	line := logLine{
 		TS:       time.Now().UTC().Format(time.RFC3339),
@@ -400,7 +406,32 @@ func (r *Recorder) Flush() error {
 	return r.flushLocked()
 }
 
+// honourResetLocked zeroes the in-memory ledger when the file it mirrors has been
+// removed from underneath it. `stats --reset` runs in the CLI process and can only
+// delete the file; without this the daemon kept its own totals and the next request
+// resurrected them — measured: reset, then one request, and a 1-request ledger came
+// back reading 2 requests. The file IS the ledger, so a caller that removes it has
+// said what they meant.
+//
+// Only a file this Recorder has already written counts: a daemon that has not
+// flushed yet has nothing to honour, and treating "absent" as "reset" there would
+// zero a ledger loaded at boot before its first flush.
+//
+// Called from both Record and flush. The stat() costs nothing next to the JSONL
+// append the same call already performs.
+func (r *Recorder) honourResetLocked() {
+	if !r.wrote {
+		return
+	}
+	if _, err := os.Stat(r.statsPath); err == nil || !os.IsNotExist(err) {
+		return
+	}
+	r.led = ledger{Since: time.Now().UTC().Format(time.RFC3339)}
+	r.wrote = false
+}
+
 func (r *Recorder) flushLocked() error {
+	r.honourResetLocked()
 	if !r.dirty {
 		return nil
 	}
@@ -416,6 +447,7 @@ func (r *Recorder) flushLocked() error {
 		return err
 	}
 	r.dirty = false
+	r.wrote = true
 	return nil
 }
 

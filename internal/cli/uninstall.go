@@ -45,7 +45,9 @@ func cmdUninstall(args []string) int {
 		}
 
 		// Reverse the user-scope MCP registration (global "follows you" wiring).
-		unregisterUserMCP()
+		if unregisterUserMCP() {
+			fmt.Println("removed the worker MCP server from", userClaudeJSON())
+		}
 	}
 
 	// Reverse a workspace-trust grant, and only one rig made (trust.go keeps the

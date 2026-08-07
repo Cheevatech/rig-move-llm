@@ -40,6 +40,14 @@ Anthropic quota, and that is verifiable at the wire. Whether it is *worth it* de
 much of the offloaded work you accept — and the one measurement of both halves points in
 opposite directions, so the repo README quotes neither figure.
 
+**There is also no recommended use case yet.** rig used to describe itself as good for work
+you are willing to walk away from; that was never measured, and the one backtest that exists
+was exactly that kind of work and is where most of what came back needed rejecting. What the
+failures had in common was not incapability — it was the worker reporting a success it had
+not achieved. Until that is measured against work whose acceptance test the worker cannot
+edit, rig is a mechanism that verifiably moves inference to your endpoint, and the question of
+whether that is worth your time is open.
+
 > **0.8 is a breaking change.** The delegate arm is gone: the force-delegate hook, the MCP
 > delegate tool, `rig-move-llm watch`, the deterministic gate on the worker's result, and
 > engine selection — along with the savings figure that was measured on them. `ENABLED` now

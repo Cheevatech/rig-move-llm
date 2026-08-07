@@ -6,7 +6,7 @@ Plan and scope on Claude. Type `/worker on`. The next turn is answered by your o
 
 **Either model can throw the switch itself, and so can you.** `/worker on` is a plain slash command that runs one CLI call, so the paid model can hand off the moment its planning is done, without you watching. There is also `rig-move-llm worker on|off` from a second terminal — the one path that works no matter which model is currently driving, because it does not go through a model at all.
 
-> Status: **pre-release (0.8, unreleased).** The architecture changed twice in the last week. There is no savings number in this README, on purpose — see [What this claims](#what-this-claims-and-what-it-does-not).
+> Status: **released — 0.8.1 on npm.** The architecture changed twice in the week before 0.8. There is no savings number in this README and no recommended use case, both on purpose — see [What this claims](#what-this-claims-and-what-it-does-not).
 
 ## How it works
 

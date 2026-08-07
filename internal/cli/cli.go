@@ -55,7 +55,7 @@ Control
 
 Run
   rig-move-llm run    [--] <command...>    launch a command with the proxy wired in
-  rig-move-llm serve  [--port N] [--status]  run the routing proxy / report its state
+  rig-move-llm serve  [--port N] [--bind ADDR] [--status]  run the routing proxy / report its state
 
   rig-move-llm version
   rig-move-llm help
@@ -125,6 +125,7 @@ func cmdServe(args []string) int {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	port := fs.String("port", "", "listen port (overrides config PORT)")
 	status := fs.Bool("status", false, "report OS-service supervision state and whether the proxy is listening")
+	bind := fs.String("bind", proxy.LoopbackBind, "interface to listen on — anything but loopback exposes an unauthenticated relay to your worker")
 	_ = fs.Parse(args)
 
 	cfg := config.Load()
@@ -136,6 +137,13 @@ func cmdServe(args []string) int {
 	}
 
 	srv := proxy.New(cfg)
+	srv.Bind = *bind
+	if *bind != proxy.LoopbackBind {
+		// Worth a line on stderr rather than only in the log: the worker leg
+		// authenticates with the key in config.env, so off-box callers need no
+		// credentials of their own.
+		fmt.Fprintf(os.Stderr, "serve: listening on %s, not loopback — anyone who can reach this port can spend your worker endpoint\n", *bind)
+	}
 
 	// Flush the ledger and close the log cleanly on SIGTERM/SIGINT so counters
 	// survive a reboot or `run` teardown.

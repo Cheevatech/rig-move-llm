@@ -131,11 +131,13 @@ Control
 
 Run
   rig-move-llm run    [--] <command...>           launch a command with the proxy wired in
-  rig-move-llm serve  [--port N] [--status]       run the routing proxy / report its state
+  rig-move-llm serve  [--port N] [--bind ADDR] [--status]  run the routing proxy / report its state
   rig-move-llm version
 ```
 
 `init` flags: `--global --backend --worker-base --worker-model --worker-key --main-upstream --port --force --no-detect --service`.
+
+**The proxy listens on loopback only.** `serve --bind` can put it on another interface, and the reason to think twice is that the worker leg authenticates with the `WORKER_API_KEY` from `config.env`: a caller who can reach the port needs no credentials of their own to spend the endpoint behind it. Through 0.8.0 the bind was `:PORT` — every interface — while everything else in rig dialled `127.0.0.1`, so on a machine with a LAN or a tailnet the proxy was an open relay to your worker. Fixed in 0.8.1.
 
 `--service` requires `--global` and installs an OS service (launchd on macOS, a systemd `--user` unit on Linux, a scheduled task on Windows) so the proxy survives a reboot — and a kill: verified on macOS that killing the process brings it straight back under a new pid. `rig-move-llm serve --status` reports both facts separately, whether the supervisor has it loaded and whether anything is actually listening, because those two come apart. `uninstall --global` removes the service with everything else.
 
@@ -270,6 +272,8 @@ pkg/translate/      Anthropic ⇄ OpenAI message + stream translation
 **Migration:** `uninstall` cleans up an old install — including files written by *older* rigs (the enforcement-era hooks, output styles, `CLAUDE.md` steer and `/qwen` command) — while leaving hooks and permissions you added yourself untouched. `init` writes the new one.
 
 Verified against a simulated 0.7.x install: the hook, the `mcp__worker__implement` grant, `enableAllProjectMcpServers`, the `rig-delegate` output style, the steer, the old slash command and `.mcp.json` all went; an unrelated `Bash(ls:*)` permission in the same `settings.json` stayed.
+
+That simulation had no `settings.json.bak`, and a real machine did. Through 0.8.0, when a backup existed `uninstall` restored it and stopped — and `init` snapshots whatever is on disk, so on a machine where rig had been installed more than once the snapshot already held an older rig's hooks. They came back after being removed, under the word "complete", pointing at `rig hook`, a subcommand 0.8 deleted. 0.8.1 strips on both paths: the restore recovers what only the backup knows, the strip makes sure nothing of rig's survives it.
 
 One upgrade case needs a look rather than a command. `ENABLED` used to be read only by `config` and `doctor`; it now gates routing. If your `config.env` carries `ENABLED=false` from an older install *and* you were relying on `RIG_ROUTE_ALL_TO_WORKER=true` to offload, offload will stop after upgrading and every turn will quietly run on your paid model. Nothing breaks and no work is lost — it fails toward the expensive-but-correct side — but check `rig-move-llm config` once after upgrading. It prints which model answers the next turn and says so explicitly when the two switches disagree.
 

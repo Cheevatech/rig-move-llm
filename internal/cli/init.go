@@ -233,26 +233,44 @@ func userClaudeJSON() string {
 }
 
 // unregisterUserMCP removes the worker server from ~/.claude.json's top-level
-// mcpServers (uninstall of a global scope), leaving everything else intact.
-func unregisterUserMCP() {
+// mcpServers (uninstall of a global scope), leaving everything else intact. It
+// reports whether it removed anything.
+//
+// It writes only when there was something to remove. ~/.claude.json is Claude
+// Code's own state — auth, every project's history — and Claude Code rewrites it
+// continuously, so this read-modify-write is a lost update waiting for a
+// coincidence: read here, CC writes, this writes back the stale copy and reverts
+// it. Not writing when there is no change removes every occasion for that on the
+// overwhelmingly common path, where rig's server is not in the file at all.
+func unregisterUserMCP() bool {
 	path := userClaudeJSON()
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return
+		return false
 	}
 	root := map[string]any{}
 	if json.Unmarshal(data, &root) != nil {
-		return
+		return false
 	}
-	if servers, ok := root["mcpServers"].(map[string]any); ok {
-		delete(servers, "worker")
-		if len(servers) == 0 {
-			delete(root, "mcpServers")
-		}
+	servers, ok := root["mcpServers"].(map[string]any)
+	if !ok {
+		return false
 	}
-	if out, err := json.MarshalIndent(root, "", "  "); err == nil {
-		_ = os.WriteFile(path, append(out, '\n'), 0o644)
+	if _, present := servers["worker"]; !present {
+		return false
 	}
+	delete(servers, "worker")
+	if len(servers) == 0 {
+		delete(root, "mcpServers")
+	}
+	out, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return false
+	}
+	if os.WriteFile(path, append(out, '\n'), 0o644) != nil {
+		return false
+	}
+	return true
 }
 
 func modelNote(model string) string {

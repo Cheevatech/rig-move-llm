@@ -1,12 +1,16 @@
 # rig-move-llm
 
-**Move the heavy lifting off your paid LLM.** rig is a switch. It sits between Claude Code and Anthropic, and it lets you change *which model answers the next turn* — from your paid Claude to a worker model of your choice (your own local llama.cpp / Ollama / ExLlama, or any OpenAI-compatible API) — **in the middle of a live session, without restarting it and without losing the context you have built up.**
+**Run Claude Code on your own model.** rig sits between Claude Code and Anthropic and answers turns from a worker endpoint of your choice — your own llama.cpp / Ollama / ExLlama, or any OpenAI-compatible API — with Claude Code itself unmodified and your subscription untouched for every turn it serves.
+
+It can also change which model answers *mid-session*, without restarting and without losing the context you have built up. That switch is the reason this tool was written, and [it did not survive being measured](#so-when-should-you-use-it): handing off mid-session scored the same as running the worker from the first turn, took longer, and spent paid quota doing it. The mechanism works; the case for using it that way did not hold.
+
+**Before you install this, check whether you need it.** If your endpoint already speaks the Anthropic Messages API — recent llama.cpp does — point Claude Code straight at it with `ANTHROPIC_BASE_URL` and skip the proxy entirely. rig is for endpoints that speak OpenAI and nothing else.
 
 Plan and scope on Claude. Type `/worker on`. The next turn is answered by your own model, in the same conversation, with the same history, driving the same Claude Code toolset. Type `/worker off` to hand the wheel back.
 
 **Either model can throw the switch itself, and so can you.** `/worker on` is a plain slash command that runs one CLI call, so the paid model can hand off the moment its planning is done, without you watching. There is also `rig-move-llm worker on|off` from a second terminal — the one path that works no matter which model is currently driving, because it does not go through a model at all.
 
-> Status: **released on npm** — `npm view rig-move-llm version` for the current one. The architecture changed twice in the week before 0.8. There is no savings number in this README and no recommended use case, both on purpose — see [What this claims](#what-this-claims-and-what-it-does-not).
+> Status: **released on npm** — `npm view rig-move-llm version` for the current one. The architecture changed twice in the week before 0.8. There is still no savings number in this README, on purpose. There **is** a recommended use case now, and it is narrow — see [So when should you use it?](#so-when-should-you-use-it).
 
 ## How it works
 
@@ -73,7 +77,7 @@ Either way the flip reaches the session: a request without `/p/<id>` is served f
 **There is no savings number here, and that is deliberate.** rig has carried two savings figures in its life and both were withdrawn — the first because it was measured on machinery that had since been deleted, the second because it counted the wrong denominator. The honest statement of what has been measured is:
 
 - Offloaded turns are **not billed to your Anthropic quota**, and that part is verifiable at the wire.
-- Whether offloading is *worth it* depends on how much of the offloaded work you end up **accepting**. A small backtest on one real repository has now measured both halves of that, and they point in opposite directions: the work that was accepted cost dramatically fewer billed tokens, and most of what came back was not acceptable as-is. Either figure quoted without the other misleads, so this README quotes neither.
+- Whether offloading is *worth it* depends on how much of the offloaded work you end up **accepting**. A small backtest on one real repository has measured both halves, and they point in opposite directions: the accepted work cost dramatically fewer billed tokens, and a third of what came back was not acceptable as-is. Either figure quoted alone misleads, so neither appears as a headline — the acceptance counts and wall-clock times are reported in full [below](#so-when-should-you-use-it), where they can be read together.
 
 Treat rig as a mechanism that does exactly what it says on the wire, and judge the output yourself.
 
@@ -89,17 +93,50 @@ Other things that stay true regardless:
 
 This is also why rig ships no gate. A gate reports what the tests report, and the tests were the thing that was wrong.
 
-### So when should you use it?
-
-**There is no measured answer to that yet, and this README is not going to invent one.**
+### What we thought, and what we found
 
 An earlier version of this section said rig was "headless/AFK-shaped: good for work you are willing to walk away from." That sentence was never measured, and the one backtest that exists points the other way: those tasks *were* walk-away work — scoped implementation tasks on a real repository, left running unattended — and that is the setting where most of what came back needed rejecting. Recommending the shape that lost is not a recommendation.
 
 What the failures had in common is more useful than the count. Almost none of them were the worker being unable to do the work. They were the worker **reporting a success it had not achieved**: rewriting existing assertions until the suite went green, a test that had drifted one frame off the boundary it claimed to check, an `except Exception` that swallowed the failure, a run that kept going for forty minutes after it had what it needed and then said it was done. In every case an automatic signal said yes and a human reading the diff said no.
 
-That suggests the thing that decides whether rig pays off is not price and not speed, but **how expensive it is to notice a false success** on the kind of work you hand it. Work whose acceptance test the worker cannot edit — a failing test written in advance and declared off-limits, output checked against a known-good reference, a mechanical change you can eyeball in seconds — should behave differently from "make the suite pass." That is a hypothesis with an obvious experiment attached and no results yet.
+That suggested the thing deciding whether rig pays off is not price and not speed, but **how expensive it is to notice a false success** on the kind of work you hand it. Work whose acceptance test the worker cannot edit — a failing test written in advance and declared off-limits — should behave differently from "make the suite pass."
 
-Until there are results: rig is a mechanism that verifiably moves inference to your endpoint. Whether that is worth your time is not something this README can currently tell you.
+**That experiment has now been run, and it did not hold up.**
+
+Sixteen runs, four tasks, one real repository. Each task was a commit whose real fix is on record, replayed from its parent with the author's own test planted on top as the acceptance file. Four arms, identical prompts, one variable each. A human read every diff against the real commit.
+
+| arm | who answers | accepted | wall |
+|---|---|---|---|
+| frozen criterion, worker may not edit it | Claude plans, then worker | 2/4 | 44 min |
+| same task, worker *may* edit the test | Claude plans, then worker | 1/4 | 50 min |
+| frozen criterion + an explicit stop condition | Claude plans, then worker | 3/4 | 75 min |
+| the same prompt, no offloading at all | Claude throughout | **4/4** | **14 min** |
+| the same prompt, worker from the first turn | worker throughout | 3/4 | 55 min |
+
+Three things came out of it, and none of them flatter this tool.
+
+**The frozen criterion did not reduce false success — it moved it.** Not one run edited the acceptance file, including the runs explicitly allowed to. Instead they built exactly what the test imported and quietly dropped the half of the task it did not cover: four endpoints never written, a caller never updated. The test stayed green over an unfinished job, which is the same failure wearing different clothes.
+
+**What actually moved the number was the stop condition, not the model.** Adding one paragraph — write a plan first, and passing the test is one line on it, not the finish line — took acceptance from 2/4 to 3/4, at a real cost of about 60% more wall time. The worker could do the work all along; it stopped when the light went green. One run then ticked off a plan item it had never done, which is the first honest-to-goodness false success in the set, and it appeared only after we built somewhere for it to sign its name.
+
+**The hybrid, which is the whole idea behind the switch, bought nothing measurable.** Handing off mid-session scored the same 3/4 as running the worker from the first turn, failed the identical task in the identical way, took 37% longer, and spent a dozen requests of paid quota on the way. Against doing it yourself: the worker arm delivered three of the four jobs Claude delivered, on someone's real backlog, without touching quota — and took roughly four times as long.
+
+### So when should you use it?
+
+**If your endpoint already speaks the Anthropic Messages API, you should not.** Point Claude Code at it directly:
+
+```bash
+ANTHROPIC_BASE_URL=http://your-endpoint:8000 \
+ANTHROPIC_AUTH_TOKEN=your-key \
+ANTHROPIC_MODEL=your-model \
+  claude
+```
+
+Recent llama.cpp builds serve `/v1/messages` natively, and that is the entire job rig was doing for them. Put those three variables in a settings file per endpoint and `claude --settings` switches between them, with no proxy in the path at all. This is not a hypothetical: it is how the author of this tool now runs the setup rig was written for.
+
+**The remaining case is an endpoint that speaks OpenAI and nothing else** — Ollama, OpenRouter, Tabby, most llama.cpp builds before b10213. rig translates for those, keeps Claude Code unmodified, and costs you nothing per token. Expect roughly four times the wall clock, expect to read every diff, and do not expect the mid-session switch to earn its keep — that part has been measured and it did not.
+
+Caveats that belong next to those numbers: four tasks, one repository, one language, one reviewer, and a backtest of work that was already finished once. The handoff point was automatic and fixed, so this measures automatic handoff, not a human flipping the switch when they know planning is done. Nothing here says the tool is broken; it says the reason it was built did not survive contact with a measurement.
 
 ## Handing the wheel back
 

@@ -264,7 +264,7 @@ pkg/translate/      Anthropic ⇄ OpenAI message + stream translation
 
 **The delegate arm** — the `mcp__worker__implement` tool that spawned a `claude -p` subprocess against your endpoint and handed a diff back, plus the stall/wall guards and the kill path that bounded it. Compared head to head against the switch on the same six tasks, delegation moved less work off the paid leg while costing ~2,800 lines of machinery and a kill path that had to be built from scratch. The switch does the same job with none of it.
 
-**Removed commands:** `rig hook`, `rig worker`, `rig cascade`, `rig teammate-exec` (with the enforcement layer); `rig thin-worker`, `rig thin-supervise`, `rig watch` (with the delegate arm).
+**Removed commands:** `rig hook`, `rig worker`, `rig cascade`, `rig teammate-exec` (with the enforcement layer); `rig thin-worker`, `rig thin-supervise`, `rig watch` (with the delegate arm). The name `rig worker` is reused, not kept: it used to run the worker subprocess, and in 0.8 it is the switch — `worker on|off|status`.
 **Removed config keys:** `GATE_MODE`, `VERIFY_CMD`, `RIG_MAX_DELEGATE_ROUNDS`, `RIG_THIN_STALL`, `RIG_THIN_WALL`, `RIG_CC_BASE_URL`, `RIG_CC_MODEL`, `RIG_WORKER_ENGINE`, `MAIN_SHARED_MCP`, `WORKER_HEALTH_PATH`, `WORKER_HEALTH_TIMEOUT_MS`, `WORKER_HEALTH_CACHE_SEC`. A key that is still parsed but no longer read is worse than a deleted one: it looks like a setting you can act on.
 
 **Migration:** `uninstall` cleans up an old install — including files written by *older* rigs (the enforcement-era hooks, output styles, `CLAUDE.md` steer and `/qwen` command) — while leaving hooks and permissions you added yourself untouched. `init` writes the new one.

@@ -82,12 +82,24 @@ Other things that stay true regardless:
 - **Quota is counted server-side.** A local worker's generation is 100% outside your Anthropic quota. There is nothing client-side to fool.
 - **A local worker is free compute; an API worker is cheaper, not free.**
 - **Claude Code's `/cost` display is cosmetic under rig.** It prices every turn as if Claude had answered it, including turns your local model answered, and it can jump tiers on a long context. Read `rig-move-llm stats` instead — and read `stats` with the caveat in [Accounting](#accounting).
-- **Worker models are slower than the frontier, and vary run to run.** Two runs of the same task can produce materially different work. This is headless/AFK-shaped: good for work you are willing to walk away from, poor for interactive latency.
+- **Worker models are slower than the frontier, and vary run to run.** Two runs of the same task can produce materially different work, and a task that took the paid model minutes can take the worker hours. That rules out interactive use. It does not, on its own, argue for any other use — see below.
 - **Nothing certifies the worker's output.** rig has no gate, no verdict, no pass/fail. You read the diff. That is the check.
 
 **How often does it need rejecting? Often enough that reading is the job, not a formality.** In a small backtest on one real repository, most of what came back through the switch was not acceptable as-is. Twice the model's own tests passed while the code was wrong — one test compared the wrong two array elements, and another's assertions were written `assert (cond, "message")`, a tuple that can never be false. Both were caught by reading the diff, and only by reading it.
 
 This is also why rig ships no gate. A gate reports what the tests report, and the tests were the thing that was wrong.
+
+### So when should you use it?
+
+**There is no measured answer to that yet, and this README is not going to invent one.**
+
+An earlier version of this section said rig was "headless/AFK-shaped: good for work you are willing to walk away from." That sentence was never measured, and the one backtest that exists points the other way: those tasks *were* walk-away work — scoped implementation tasks on a real repository, left running unattended — and that is the setting where most of what came back needed rejecting. Recommending the shape that lost is not a recommendation.
+
+What the failures had in common is more useful than the count. Almost none of them were the worker being unable to do the work. They were the worker **reporting a success it had not achieved**: rewriting existing assertions until the suite went green, a test that had drifted one frame off the boundary it claimed to check, an `except Exception` that swallowed the failure, a run that kept going for forty minutes after it had what it needed and then said it was done. In every case an automatic signal said yes and a human reading the diff said no.
+
+That suggests the thing that decides whether rig pays off is not price and not speed, but **how expensive it is to notice a false success** on the kind of work you hand it. Work whose acceptance test the worker cannot edit — a failing test written in advance and declared off-limits, output checked against a known-good reference, a mechanical change you can eyeball in seconds — should behave differently from "make the suite pass." That is a hypothesis with an obvious experiment attached and no results yet.
+
+Until there are results: rig is a mechanism that verifiably moves inference to your endpoint. Whether that is worth your time is not something this README can currently tell you.
 
 ## Handing the wheel back
 

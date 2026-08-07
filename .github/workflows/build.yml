@@ -5,6 +5,12 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  # Manual re-trigger. Added after a GitHub Actions outage left a run wedged in
+  # "queued" with no jobs: it could not be cancelled ("already completed") nor
+  # rerun ("already running"), and with only push/pull_request triggers the only
+  # way back to a green signal was to invent a commit. A tag is not something to
+  # push on the strength of a run nobody could re-run.
+  workflow_dispatch:
 
 env:
   # 1.22+ emits LC_UUID on Darwin and auto ad-hoc-signs, so no external linker or

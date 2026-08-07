@@ -1,7 +1,7 @@
 {
   "name": "rig-move-llm",
   "version": "0.2.0",
-  "description": "Move the heavy lifting off your paid LLM — a local proxy that swaps the model answering the next turn of a live Claude Code session to your own endpoint.",
+  "description": "Run Claude Code on your own OpenAI-compatible endpoint — an unmodified Claude Code, a local proxy, and your subscription untouched for every turn your model serves.",
   "bin": {
     "rig-move-llm": "bin/rig-move-llm.js"
   },

@@ -1,14 +1,18 @@
 # rig-move-llm
 
-**Move the heavy lifting off your paid LLM.** rig is a switch. It sits between Claude Code
-and Anthropic, and it lets you change *which model answers the next turn* — from your paid
-Claude to a worker model of your choice (your own local llama.cpp / Ollama / ExLlama, or any
-OpenAI-compatible API) — **in the middle of a live session, without restarting it and without
-losing the context you have built up.**
+**Run Claude Code on your own model.** rig sits between Claude Code and Anthropic and answers
+turns from a worker endpoint of your choice — your own llama.cpp / Ollama / ExLlama, or any
+OpenAI-compatible API — with Claude Code itself unmodified and your subscription untouched for
+every turn it serves.
 
-Plan and scope on Claude. Type `/worker on`. The next turn is answered by your own model, in
-the same conversation, with the same history, driving the same Claude Code toolset. Type
-`/worker off` to hand the wheel back.
+**Check whether you need it first.** If your endpoint already speaks the Anthropic Messages
+API — recent llama.cpp does — set `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` and
+`ANTHROPIC_MODEL` and point Claude Code straight at it. No proxy, nothing to install. rig is
+for endpoints that speak OpenAI and nothing else: Ollama, OpenRouter, Tabby, older llama.cpp.
+
+It can also swap the model *mid-session* — `/worker on`, and the next turn is answered by your
+model in the same conversation with the same history. That switch is why this tool exists, and
+it is the part that did not survive measurement: see below.
 
 ```sh
 npx rig-move-llm                  # interactive setup wizard (offers to install itself)
@@ -40,13 +44,21 @@ Anthropic quota, and that is verifiable at the wire. Whether it is *worth it* de
 much of the offloaded work you accept — and the one measurement of both halves points in
 opposite directions, so the repo README quotes neither figure.
 
-**There is also no recommended use case yet.** rig used to describe itself as good for work
-you are willing to walk away from; that was never measured, and the one backtest that exists
-was exactly that kind of work and is where most of what came back needed rejecting. What the
-failures had in common was not incapability — it was the worker reporting a success it had
-not achieved. Until that is measured against work whose acceptance test the worker cannot
-edit, rig is a mechanism that verifiably moves inference to your endpoint, and the question of
-whether that is worth your time is open.
+**The recommended use case is now measured, and it is narrow.** Sixteen runs over four
+commits from one real repository, replayed from the parent with the author's own test planted
+as the acceptance file, every diff read by a human: doing it with no offloading at all
+accepted 4/4 in 14 minutes; the worker from the first turn accepted 3/4 in 55 minutes without
+touching quota; handing off mid-session — the switch, the whole idea — also accepted 3/4, took
+37% longer, failed the identical task in the identical way, and spent paid quota getting
+there. A frozen acceptance test did not reduce false success either; it moved it, from
+rewriting the test to silently skipping the half of the task the test did not cover.
+
+**So: if your endpoint already speaks the Anthropic Messages API — recent llama.cpp does —
+you do not need this.** Set `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` and
+`ANTHROPIC_MODEL` and point Claude Code straight at it. rig is for the endpoint that speaks
+OpenAI and nothing else: Ollama, OpenRouter, Tabby, older llama.cpp. Expect about four times
+the wall clock, expect to read every diff, and do not expect the mid-session switch to earn
+its keep.
 
 > **0.8 is a breaking change.** The delegate arm is gone: the force-delegate hook, the MCP
 > delegate tool, `rig-move-llm watch`, the deterministic gate on the worker's result, and

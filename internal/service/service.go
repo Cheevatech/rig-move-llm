@@ -241,11 +241,14 @@ func (m *Manager) Uninstall() (string, error) {
 	default:
 		_, _ = m.Run("systemctl", "--user", "disable", "--now", UnitName+".service")
 	}
-	removed := ""
-	if err := os.Remove(path); err == nil {
-		removed = " (removed " + path + ")"
+	// The unit file is the thing that either existed or did not. Report only when
+	// one was actually removed: a machine that never ran `init --service` was
+	// being told its service had been removed, which is a claim about a change
+	// that did not happen.
+	if err := os.Remove(path); err != nil {
+		return "", nil
 	}
-	return "removed OS service" + removed, nil
+	return "removed OS service (" + path + ")", nil
 }
 
 // Status reports whether the supervisor considers the service loaded/active.

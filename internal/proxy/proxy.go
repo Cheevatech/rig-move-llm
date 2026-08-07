@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -40,15 +41,25 @@ type Server struct {
 	// injecting a fixture wants — without that escape hatch every such test would
 	// silently pick up the developer's real config.env and egress to the real
 	// upstream. New() wires the production implementation.
-	reload  func() config.Config
-	rec     *stats.Recorder // observability recorder; nil disables recording
+	reload func() config.Config
+	rec    *stats.Recorder // observability recorder; nil disables recording
+	// Bind is the interface ListenAndServe binds to. It defaults to loopback and
+	// should stay there: the worker leg answers with the endpoint and API key from
+	// config.env, so a proxy reachable off-box is an unauthenticated relay to
+	// whatever the worker points at. `serve --bind` is the deliberate opt-out.
+	Bind    string
 	httpSrv *http.Server
 }
+
+// LoopbackBind is the default listen interface — everything else in rig (run,
+// doctor, serve --status) dials 127.0.0.1, and this is where that assumption is
+// actually enforced.
+const LoopbackBind = "127.0.0.1"
 
 // New builds a Server from resolved configuration. It opens the observability
 // recorder; if that fails the server still runs, just without recording.
 func New(cfg config.Config) *Server {
-	s := &Server{cfg: cfg, reload: config.Load}
+	s := &Server{cfg: cfg, reload: config.Load, Bind: LoopbackBind}
 	if rec, err := stats.NewRecorder(cfg.DataDir, cfg.LogBodies); err == nil {
 		rec.SetMaxLogBytes(int64(cfg.LogMaxMB) << 20)
 		s.rec = rec
@@ -65,11 +76,22 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
+// ListenAddr is the address ListenAndServe binds. An empty Bind means loopback,
+// so a zero-value Server (a test constructing one by hand) is never off-box;
+// binding every interface has to be spelled out as "0.0.0.0".
+func (s *Server) ListenAddr() string {
+	bind := s.Bind
+	if bind == "" {
+		bind = LoopbackBind
+	}
+	return net.JoinHostPort(bind, s.cfg.Port)
+}
+
 // ListenAndServe binds the configured port and serves until error. It starts the
 // recorder's periodic flush so counters survive an unclean exit between flushes.
 func (s *Server) ListenAndServe() error {
 	s.rec.StartFlusher(5 * time.Second)
-	addr := ":" + s.cfg.Port
+	addr := s.ListenAddr()
 	log.Printf("rig-move-llm listening on %s | main=%s backend=%s",
 		addr, s.cfg.MainUpstreamURL, s.cfg.Backend.Name)
 	s.httpSrv = &http.Server{Addr: addr, Handler: s.Handler()}

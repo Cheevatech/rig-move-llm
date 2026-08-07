@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -39,7 +40,7 @@ func cmdUninstall(args []string) int {
 
 		// Reverse `init --service` (idempotent: a no-op when never installed).
 		self, _ := os.Executable()
-		if msg, err := service.New(self, home, dataDir).Uninstall(); err == nil {
+		if msg, err := service.New(self, home, dataDir).Uninstall(); err == nil && msg != "" {
 			fmt.Println(msg)
 		}
 
@@ -58,14 +59,23 @@ func cmdUninstall(args []string) int {
 
 	settingsPath := filepath.Join(claudeDir, "settings.json")
 	backupPath := filepath.Join(dataDir, "settings.json.bak")
+	restored := false
 	if fileExists(backupPath) {
 		if data, err := os.ReadFile(backupPath); err == nil {
 			_ = os.WriteFile(settingsPath, data, 0o644)
 			_ = os.Remove(backupPath)
+			restored = true
 			fmt.Println("restored", settingsPath, "from backup")
 		}
-	} else if err := stripRigHooks(settingsPath); err == nil {
-		fmt.Println("removed rig-move-llm hooks from", settingsPath)
+	}
+	// A backup is not evidence of a pre-rig state. `init` snapshots whatever is on
+	// disk, so on a machine where rig was installed more than once the snapshot
+	// already contains an older rig's hooks — and restoring it put them back, after
+	// this command had just removed them, under the word "complete". Strip on both
+	// paths: restore recovers the settings only the backup knows, the strip makes
+	// sure nothing of ours survives it.
+	if changed, err := stripRigSettings(settingsPath, !restored); err == nil && changed {
+		fmt.Println("removed rig-move-llm settings from", settingsPath)
 	}
 
 	remove(filepath.Join(dataDir, "mcp.json"))
@@ -105,20 +115,28 @@ func cmdUninstall(args []string) int {
 	return 0
 }
 
-// stripRigHooks removes only the hook entries whose command mentions rig-move-llm,
-// leaving any user-added hooks intact. Empty arrays/objects are pruned.
-func stripRigHooks(path string) error {
+// stripRigSettings removes what rig put in settings.json — hook entries whose
+// command mentions rig-move-llm, our output style, our worker-tool permission —
+// leaving everything the user added intact. Empty arrays/objects are pruned. It
+// reports whether the file changed, so the caller says "removed" only when
+// something was.
+//
+// ownsFile says the file exists because init created it, which is the only case
+// where an ambiguous key (one a user could plausibly have set themselves) is
+// safe to delete. After a restore from backup the file is the user's again, so
+// only the unambiguous markers go.
+func stripRigSettings(path string, ownsFile bool) (bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		return false, err
 	}
 	var settings map[string]any
 	if err := json.Unmarshal(data, &settings); err != nil {
-		return err
+		return false, err
 	}
-	// We reach stripRigHooks only when no pre-init backup exists (settings.json was
-	// created fresh by init), so removing our injected keys is safe here.
-	delete(settings, "enableAllProjectMcpServers")
+	if ownsFile {
+		delete(settings, "enableAllProjectMcpServers")
+	}
 	if settings["outputStyle"] == "rig-delegate" || settings["outputStyle"] == "rig-explore" {
 		delete(settings, "outputStyle")
 	}
@@ -143,11 +161,7 @@ func stripRigHooks(path string) error {
 	}
 	hooks, ok := settings["hooks"].(map[string]any)
 	if !ok {
-		out, err := json.MarshalIndent(settings, "", "  ")
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(path, append(out, '\n'), 0o644)
+		return writeSettings(path, settings, data)
 	}
 	for phase, entriesAny := range hooks {
 		entries, ok := entriesAny.([]any)
@@ -169,11 +183,29 @@ func stripRigHooks(path string) error {
 	if len(hooks) == 0 {
 		delete(settings, "hooks")
 	}
+	return writeSettings(path, settings, data)
+}
+
+// writeSettings persists settings and reports whether that changed the file.
+// The comparison is against the re-marshalled original rather than the bytes on
+// disk, so a pure reformat (key order, indentation) does not get announced as a
+// removal — the caller's line is about rig's entries, not whitespace.
+func writeSettings(path string, settings map[string]any, before []byte) (bool, error) {
 	out, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
-		return err
+		return false, err
 	}
-	return os.WriteFile(path, append(out, '\n'), 0o644)
+	changed := true
+	var orig map[string]any
+	if json.Unmarshal(before, &orig) == nil {
+		if canon, err := json.MarshalIndent(orig, "", "  "); err == nil {
+			changed = !bytes.Equal(canon, out)
+		}
+	}
+	if err := os.WriteFile(path, append(out, '\n'), 0o644); err != nil {
+		return false, err
+	}
+	return changed, nil
 }
 
 // mentionsRig reports whether a hook entry contains a command

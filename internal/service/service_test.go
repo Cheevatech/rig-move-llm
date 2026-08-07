@@ -185,10 +185,21 @@ func TestUninstallRoundtrip(t *testing.T) {
 	}
 }
 
+// TestUninstallIdempotentWhenNeverInstalled also pins what it SAYS. Asserting
+// only that the error is nil is how "removed OS service" came to be printed on
+// machines that never ran `init --service`: the call was a correct no-op and the
+// line above it was a false claim about a change that did not happen. A no-op
+// reports nothing, and cmdUninstall prints nothing for an empty message.
 func TestUninstallIdempotentWhenNeverInstalled(t *testing.T) {
-	m, _ := mgr("linux", t)
-	if _, err := m.Uninstall(); err != nil {
-		t.Fatalf("uninstall without install must be a no-op, got %v", err)
+	for _, goos := range []string{"darwin", "linux", "windows"} {
+		m, _ := mgr(goos, t)
+		msg, err := m.Uninstall()
+		if err != nil {
+			t.Fatalf("%s: uninstall without install must be a no-op, got %v", goos, err)
+		}
+		if msg != "" {
+			t.Errorf("%s: reported %q with no service ever installed", goos, msg)
+		}
 	}
 }
 
